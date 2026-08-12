@@ -1,0 +1,7 @@
+=== RUN   TestCaptureDoesNotCopyRepositoryHistoryPerCase
+    objects_test.go:61: corpus after first case: 539484 bytes; marginal cost of second case: 20624 bytes
+--- PASS: TestCaptureDoesNotCopyRepositoryHistoryPerCase (1.18s)
+=== RUN   TestPruneBoundsTheCorpusOldestFirstAndKeepsEvaluatedCases
+--- PASS: TestPruneBoundsTheCorpusOldestFirstAndKeepsEvaluatedCases (0.01s)
+PASS
+ok  	github.com/kunchenguid/no-mistakes/internal/eval	1.534s

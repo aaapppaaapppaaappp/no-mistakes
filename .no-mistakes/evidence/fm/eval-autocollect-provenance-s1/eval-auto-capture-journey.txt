@@ -1,0 +1,15 @@
+=== RUN   TestEvalAutoCaptureJourney
+    eval_test.go:170: eval sets output after an ordinary run:
+        LOCAL-ONLY EVAL CASE SETS
+        
+        all: 1 cases, 1 verdict labels (park 0, pass 1), 0 candidate findings queued
+          1  repo=8310b3d8a935, language=go, size=tiny, severity=warning
+        
+        labeled: 1 cases, 1 verdict labels (park 0, pass 1), 0 candidate findings queued
+          1  repo=8310b3d8a935, language=go, size=tiny, severity=warning
+        
+        diversified: 1 cases, 1 verdict labels (park 0, pass 1), 0 candidate findings queued
+          1  repo=8310b3d8a935, language=go, size=tiny, severity=warning
+--- PASS: TestEvalAutoCaptureJourney (4.66s)
+PASS
+ok  	github.com/kunchenguid/no-mistakes/internal/e2e	4.963s
