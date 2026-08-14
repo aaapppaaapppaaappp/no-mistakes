@@ -1,0 +1,29 @@
+=== RUN   TestEvalJourney
+    eval_test.go:68: eval capture output:
+        captured 1 local review case(s)
+          01KZZ2N359TW0ZYK1CRGPKW971-01KZZ2N3KY573S8GF18CAXAD82  run 01KZZ2N359TW0ZYK1CRGPKW971 round 01KZZ2N3KY573S8GF18CAXAD82
+    eval_test.go:77: eval sets output:
+        LOCAL-ONLY EVAL CASE SETS
+        
+        all: 1 cases, 0 with finding-level gold (true-positive 0, false-negative 0), 1 unlabeled / pending, 0 candidate findings queued
+          1  repo=c24f4e1bc084, language=go, size=tiny, severity=warning
+        
+        labeled: 0 cases, 0 with finding-level gold (true-positive 0, false-negative 0), 0 unlabeled / pending, 0 candidate findings queued
+        
+        diversified: 1 cases, 0 with finding-level gold (true-positive 0, false-negative 0), 1 unlabeled / pending, 0 candidate findings queued
+          1  repo=c24f4e1bc084, language=go, size=tiny, severity=warning
+    eval_test.go:87: eval run output:
+        local eval session 1786675630356392000-abd7619cf12d7f29: 1 replay(s), candidate claude+claude-opus-4-7, repeats 1
+    eval_test.go:104: eval report output:
+        LOCAL-ONLY EVAL REPORT
+        
+        claude+claude-opus-4-7 (cohort 8f36eec5a703f426)
+          replays: 1 across 1 repeat(s); labeled: 0; failures: 0
+          finding scores: unlabeled / pending (no finding-level gold yet)
+          queued unmatched candidate findings: 1 (not scored as false-positive)
+          token cost: 28 fresh-input + output tokens per reported replay
+          wall time: 0.0s average
+          recall-vs-cost frontier: unavailable (no true-issue gold)
+--- PASS: TestEvalJourney (3.72s)
+PASS
+ok  	github.com/kunchenguid/no-mistakes/internal/e2e	4.003s
