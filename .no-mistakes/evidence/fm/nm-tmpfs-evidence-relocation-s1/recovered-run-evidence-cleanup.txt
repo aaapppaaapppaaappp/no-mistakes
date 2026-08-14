@@ -1,0 +1,25 @@
+=== RUN   TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir
+2026/08/14 12:55:22 ERROR recovered pipeline failed run_id=01M00XFTYNAV112PYNKVN1CM2V error="run is not a recoverable parked run"
+2026/08/14 12:55:22 WARN failed to remove recovered worktree path=/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir1455013828/002 error="git worktree remove --force /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir1455013828/002: exit status 128: fatal: not a git repository (or any of the parent directories): .git"
+--- PASS: TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir (0.02s)
+PASS
+ok  	github.com/kunchenguid/no-mistakes/internal/daemon	0.432s
+
+NEGATIVE CONTROL - same behavioral test with the cleanup call temporarily removed:
+=== RUN   TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir
+2026/08/14 12:55:35 ERROR recovered pipeline failed run_id=01M00XG6ZES83HVC66V76YMBB1 error="run is not a recoverable parked run"
+2026/08/14 12:55:35 WARN failed to remove recovered worktree path=/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir3671140721/002 error="git worktree remove --force /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir3671140721/002: exit status 128: fatal: not a git repository (or any of the parent directories): .git"
+    evidence_reap_test.go:396: a resumed run left its empty evidence directory behind
+--- FAIL: TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir (0.02s)
+FAIL
+FAIL	github.com/kunchenguid/no-mistakes/internal/daemon	0.412s
+FAIL
+negative-control exit code: 1 (expected nonzero)
+
+RESTORED FIX - final confirmation:
+=== RUN   TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir
+2026/08/14 12:55:35 ERROR recovered pipeline failed run_id=01M00XG7J40WV0C8FBJDT7FQK1 error="run is not a recoverable parked run"
+2026/08/14 12:55:35 WARN failed to remove recovered worktree path=/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir2247182098/002 error="git worktree remove --force /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir2247182098/002: exit status 128: fatal: not a git repository (or any of the parent directories): .git"
+--- PASS: TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir (0.02s)
+PASS
+ok  	github.com/kunchenguid/no-mistakes/internal/daemon	0.252s
