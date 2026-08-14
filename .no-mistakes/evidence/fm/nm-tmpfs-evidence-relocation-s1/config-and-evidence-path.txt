@@ -1,0 +1,6 @@
+CI test job timeout: 40 minutes
+Windows test command: go test -v -timeout=15m ./...
+Resolved review auto-fix attempts with global override=9: 0
+Default run evidence path: /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/nm-evidence-path-probe/evidence/example-run
+Evidence is inside NM_HOME: true
+Evidence uses legacy shared-temp root: false
