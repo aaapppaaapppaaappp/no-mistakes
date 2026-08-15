@@ -1,0 +1,64 @@
+timeout-minutes: 40
+matrix.include:
+  - name="test (ubuntu-latest)" os="ubuntu-latest" shard=""
+  - name="test (macos-latest)" os="macos-latest" shard=""
+  - name="test (windows-core)" os="windows-latest" shard="core"
+  - name="test (windows-git)" os="windows-latest" shard="git"
+windows go test -timeout: 15m
+git-heavy patterns: ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/pipeline/steps ./internal/daemon ./internal/eval
+NM_CI_WINDOWS_GIT_EXCLUDE: /internal/(git|branchsync|gate|evidence|pipeline/steps|daemon|eval)$
+core shard uses go list remainder: true
+git-heavy packages (7) match exclude filter: true
+core packages: 38
+union covers go list ./... (45 packages): true
+go test -timeout < timeout-minutes: true (15m < 40m)
+unix check names: "test (ubuntu-latest)", "test (macos-latest)"
+
+git-heavy packages:
+  github.com/kunchenguid/no-mistakes/internal/branchsync
+  github.com/kunchenguid/no-mistakes/internal/daemon
+  github.com/kunchenguid/no-mistakes/internal/eval
+  github.com/kunchenguid/no-mistakes/internal/evidence
+  github.com/kunchenguid/no-mistakes/internal/gate
+  github.com/kunchenguid/no-mistakes/internal/git
+  github.com/kunchenguid/no-mistakes/internal/pipeline/steps
+
+core packages:
+  github.com/kunchenguid/no-mistakes
+  github.com/kunchenguid/no-mistakes/cmd/fakeagent
+  github.com/kunchenguid/no-mistakes/cmd/genskill
+  github.com/kunchenguid/no-mistakes/cmd/no-mistakes
+  github.com/kunchenguid/no-mistakes/cmd/recordfixture
+  github.com/kunchenguid/no-mistakes/internal/agent
+  github.com/kunchenguid/no-mistakes/internal/bitbucket
+  github.com/kunchenguid/no-mistakes/internal/buildinfo
+  github.com/kunchenguid/no-mistakes/internal/cimonitor
+  github.com/kunchenguid/no-mistakes/internal/cli
+  github.com/kunchenguid/no-mistakes/internal/config
+  github.com/kunchenguid/no-mistakes/internal/conventional
+  github.com/kunchenguid/no-mistakes/internal/db
+  github.com/kunchenguid/no-mistakes/internal/e2e
+  github.com/kunchenguid/no-mistakes/internal/e2edaemon
+  github.com/kunchenguid/no-mistakes/internal/gatecontext
+  github.com/kunchenguid/no-mistakes/internal/gateguidance
+  github.com/kunchenguid/no-mistakes/internal/intent
+  github.com/kunchenguid/no-mistakes/internal/ipc
+  github.com/kunchenguid/no-mistakes/internal/lifecycle
+  github.com/kunchenguid/no-mistakes/internal/logstore
+  github.com/kunchenguid/no-mistakes/internal/paths
+  github.com/kunchenguid/no-mistakes/internal/pipeline
+  github.com/kunchenguid/no-mistakes/internal/procreap
+  github.com/kunchenguid/no-mistakes/internal/safeurl
+  github.com/kunchenguid/no-mistakes/internal/scm
+  github.com/kunchenguid/no-mistakes/internal/scm/azuredevops
+  github.com/kunchenguid/no-mistakes/internal/scm/github
+  github.com/kunchenguid/no-mistakes/internal/scm/gitlab
+  github.com/kunchenguid/no-mistakes/internal/shellenv
+  github.com/kunchenguid/no-mistakes/internal/skill
+  github.com/kunchenguid/no-mistakes/internal/telemetry
+  github.com/kunchenguid/no-mistakes/internal/testguidance
+  github.com/kunchenguid/no-mistakes/internal/tui
+  github.com/kunchenguid/no-mistakes/internal/types
+  github.com/kunchenguid/no-mistakes/internal/update
+  github.com/kunchenguid/no-mistakes/internal/winproc
+  github.com/kunchenguid/no-mistakes/internal/wizard

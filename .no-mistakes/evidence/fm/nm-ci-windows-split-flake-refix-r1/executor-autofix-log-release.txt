@@ -1,0 +1,9 @@
+auto-fix max: 2
+step calls: 3 (1 initial + 2 auto-fix)
+parked status: fix_review
+lint.log present while parked: true
+cancel released lint.log (os.Remove): true
+poll interval used: 50ms
+
+status timeline:
+  18:43:19.257  lint status=fix_review calls=3

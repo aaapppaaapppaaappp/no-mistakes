@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>no-mistakes CI hardening evidence</title>
+<style>
+body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1.5rem;color:#111}
+h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:2rem}
+pre{background:#f6f6f4;border:1px solid #ddd;padding:1rem;overflow:auto;font-size:12px;line-height:1.4}
+.ok{color:#0a7} .note{color:#555}
+</style></head><body>
+<h1>CI hardening evidence (2026-08-14)</h1>
+<p class="note">Typed workflow model + live public-API demos. Not a UI change; this is the reviewer-visible contract surface.</p>
+<h2>1. Windows matrix split</h2>
+<p>Job cap stays 40 minutes. Each Windows shard runs <code>go test -timeout=15m</code>, so a hang dumps goroutines instead of an evidence-free job cancel. Unix check names stay <code>test (ubuntu-latest)</code> and <code>test (macos-latest)</code>.</p>
+<pre>timeout-minutes: 40
+matrix.include:
+  - name=&#34;test (ubuntu-latest)&#34; os=&#34;ubuntu-latest&#34; shard=&#34;&#34;
+  - name=&#34;test (macos-latest)&#34; os=&#34;macos-latest&#34; shard=&#34;&#34;
+  - name=&#34;test (windows-core)&#34; os=&#34;windows-latest&#34; shard=&#34;core&#34;
+  - name=&#34;test (windows-git)&#34; os=&#34;windows-latest&#34; shard=&#34;git&#34;
+windows go test -timeout: 15m
+git-heavy patterns: ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/pipeline/steps ./internal/daemon ./internal/eval
+NM_CI_WINDOWS_GIT_EXCLUDE: /internal/(git|branchsync|gate|evidence|pipeline/steps|daemon|eval)$
+core shard uses go list remainder: true
+git-heavy packages (7) match exclude filter: true
+core packages: 38
+union covers go list ./... (45 packages): true
+go test -timeout &lt; timeout-minutes: true (15m &lt; 40m)
+unix check names: &#34;test (ubuntu-latest)&#34;, &#34;test (macos-latest)&#34;
+
+git-heavy packages:
+  github.com/kunchenguid/no-mistakes/internal/branchsync
+  github.com/kunchenguid/no-mistakes/internal/daemon
+  github.com/kunchenguid/no-mistakes/internal/eval
+  github.com/kunchenguid/no-mistakes/internal/evidence
+  github.com/kunchenguid/no-mistakes/internal/gate
+  github.com/kunchenguid/no-mistakes/internal/git
+  github.com/kunchenguid/no-mistakes/internal/pipeline/steps
+
+core packages:
+  github.com/kunchenguid/no-mistakes
+  github.com/kunchenguid/no-mistakes/cmd/fakeagent
+  github.com/kunchenguid/no-mistakes/cmd/genskill
+  github.com/kunchenguid/no-mistakes/cmd/no-mistakes
+  github.com/kunchenguid/no-mistakes/cmd/recordfixture
+  github.com/kunchenguid/no-mistakes/internal/agent
+  github.com/kunchenguid/no-mistakes/internal/bitbucket
+  github.com/kunchenguid/no-mistakes/internal/buildinfo
+  github.com/kunchenguid/no-mistakes/internal/cimonitor
+  github.com/kunchenguid/no-mistakes/internal/cli
+  github.com/kunchenguid/no-mistakes/internal/config
+  github.com/kunchenguid/no-mistakes/internal/conventional
+  github.com/kunchenguid/no-mistakes/internal/db
+  github.com/kunchenguid/no-mistakes/internal/e2e
+  github.com/kunchenguid/no-mistakes/internal/e2edaemon
+  github.com/kunchenguid/no-mistakes/internal/gatecontext
+  github.com/kunchenguid/no-mistakes/internal/gateguidance
+  github.com/kunchenguid/no-mistakes/internal/intent
+  github.com/kunchenguid/no-mistakes/internal/ipc
+  github.com/kunchenguid/no-mistakes/internal/lifecycle
+  github.com/kunchenguid/no-mistakes/internal/logstore
+  github.com/kunchenguid/no-mistakes/internal/paths
+  github.com/kunchenguid/no-mistakes/internal/pipeline
+  github.com/kunchenguid/no-mistakes/internal/procreap
+  github.com/kunchenguid/no-mistakes/internal/safeurl
+  github.com/kunchenguid/no-mistakes/internal/scm
+  github.com/kunchenguid/no-mistakes/internal/scm/azuredevops
+  github.com/kunchenguid/no-mistakes/internal/scm/github
+  github.com/kunchenguid/no-mistakes/internal/scm/gitlab
+  github.com/kunchenguid/no-mistakes/internal/shellenv
+  github.com/kunchenguid/no-mistakes/internal/skill
+  github.com/kunchenguid/no-mistakes/internal/telemetry
+  github.com/kunchenguid/no-mistakes/internal/testguidance
+  github.com/kunchenguid/no-mistakes/internal/tui
+  github.com/kunchenguid/no-mistakes/internal/types
+  github.com/kunchenguid/no-mistakes/internal/update
+  github.com/kunchenguid/no-mistakes/internal/winproc
+  github.com/kunchenguid/no-mistakes/internal/wizard
+</pre>
+<h2>2. SIGTERM handler contract</h2>
+<p>Grandchild is a Go <code>signal.Notify</code> helper (not bash trap+sleep). <code>TerminateShellCommandGroup</code> delivered SIGTERM and the handler wrote the term file before reap.</p>
+<pre>grandchild pid: 35395
+SIGTERM handler wrote: &#34;terminated&#34;
+handler ran before SIGKILL: true
+grandchild reaped: true
+elapsed after TerminateShellCommandGroup: 26ms
+contract: Go signal.Notify helper observed SIGTERM and wrote the term file
+</pre>
+<h2>3. Auto-fix poll + log-handle release</h2>
+<p>Lint auto-fix exhausted 2 attempts, parked at <code>fix_review</code>, then cancel closed <code>lint.log</code> so unlink succeeded (the Windows handle-leak class).</p>
+<pre>auto-fix max: 2
+step calls: 3 (1 initial + 2 auto-fix)
+parked status: fix_review
+lint.log present while parked: true
+cancel released lint.log (os.Remove): true
+poll interval used: 50ms
+
+status timeline:
+  18:43:19.257  lint status=fix_review calls=3
+</pre>
+</body></html>

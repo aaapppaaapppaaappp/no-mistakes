@@ -1,0 +1,6 @@
+grandchild pid: 35395
+SIGTERM handler wrote: "terminated"
+handler ran before SIGKILL: true
+grandchild reaped: true
+elapsed after TerminateShellCommandGroup: 26ms
+contract: Go signal.Notify helper observed SIGTERM and wrote the term file
