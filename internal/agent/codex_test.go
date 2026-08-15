@@ -88,6 +88,24 @@ func TestCodexAgent_BuildArgs_ExtraArgsAfterExec(t *testing.T) {
 	}
 }
 
+func TestCodexAgent_BuildCommandArgs_LauncherPrefixBeforeExec(t *testing.T) {
+	ca := &codexAgent{
+		bin:           "unsloth",
+		commandPrefix: []string{"start", "codex", "--persist"},
+	}
+	args := ca.buildCommandArgs("fix it", "", "")
+
+	wantPrefix := []string{"start", "codex", "--persist", "exec"}
+	if len(args) < len(wantPrefix) {
+		t.Fatalf("command args too short: %v", args)
+	}
+	for i, want := range wantPrefix {
+		if args[i] != want {
+			t.Fatalf("arg[%d] = %q, want %q in %v", i, args[i], want, args)
+		}
+	}
+}
+
 func TestCodexAgent_BuildArgs_UserExecutionModeSuppressesBypass(t *testing.T) {
 	tests := [][]string{
 		{"--ask-for-approval", "untrusted"},

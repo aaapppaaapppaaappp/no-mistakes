@@ -10,6 +10,9 @@ Global configuration lives at `~/.no-mistakes/config.yaml`. Set `NM_HOME` to rel
 
 agent: auto
 
+review_fixer_agent: codex
+review_fixer_command: [unsloth, start, codex, --persist]
+
 acpx_path: acpx
 
 forgejo_axi_path: forgejo-axi
@@ -131,6 +134,56 @@ After resolving `auto`, entries that resolve to the same ACP target are deduplic
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
+
+### review_fixer_agent
+
+Optional dedicated agent for the fix turns inside the Review step. Review turns
+and every other pipeline invocation continue to use `agent`.
+
+|         |                                                                                             |
+| ------- | ------------------------------------------------------------------------------------------- |
+| Type    | `string`                                                                                    |
+| Values  | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
+| Default | Empty (uses `agent`)                                                                        |
+
+This is a global-only operator setting; repositories cannot select a different
+local executable. The configured fixer must resolve to a runnable agent before
+the gate begins.
+
+```yaml
+agent: codex
+review_fixer_agent: codex
+review_fixer_command: [unsloth, start, codex, --persist]
+```
+
+With this configuration, the initial review and every independent re-review use
+Codex. Only the existing `review-fix` turns that edit the managed worktree use
+Codex through Unsloth's isolated local-model profile. This setting does not add
+another loop or change pipeline order.
+
+### review_fixer_command
+
+Optional launcher argv for a Codex review fixer. no-mistakes appends its managed
+`codex exec ...` arguments after this list. The executable must be available when
+the gate starts.
+
+|         |                               |
+| ------- | ----------------------------- |
+| Type    | `string[]`                    |
+| Default | Empty (launch Codex directly) |
+
+The launcher process is intentionally isolated from `agent_args_override.codex`.
+This prevents the default reviewer's remote model/provider pins from overriding
+the launcher's local profile. no-mistakes still appends its own execution,
+structured-output, and safety flags after the launcher prefix.
+
+Unsloth's `--persist` keeps its private `CODEX_HOME` stable so the existing
+review-fixer session reuse can resume a local Codex thread across fix rounds.
+Without `--persist`, Unsloth intentionally removes that private home when each
+Codex process exits.
+
+`review_fixer_command` currently requires `review_fixer_agent: codex`. ACP or
+other native fixers do not need it; select them with `review_fixer_agent` alone.
 
 ### acpx_path
 

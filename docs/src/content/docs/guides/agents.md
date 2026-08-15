@@ -109,6 +109,29 @@ agent: codex
 
 Repo config takes precedence over global config.
 
+### Dedicated review fixer
+
+Keep the default agent as the independent reviewer while sending only the
+existing Review step's fix turns to another agent:
+
+```yaml
+# ~/.no-mistakes/config.yaml
+agent: codex
+review_fixer_agent: codex
+review_fixer_command: [unsloth, start, codex, --persist]
+```
+
+`review_fixer_agent` is global-only. It does not add another loop: after the
+fixer edits the managed worktree, the Review step performs its normal fresh
+re-review using `agent`. The launcher receives no `agent_args_override.codex`
+values, so reviewer-only remote model/provider pins cannot replace Unsloth's
+local profile.
+
+The command above relies on Unsloth's argument passthrough: no-mistakes' managed
+`exec` arguments are appended after `unsloth start codex --persist`. `--persist`
+keeps Unsloth's private `CODEX_HOME` available for the Review step's existing
+fixer-session reuse without changing the user's normal Codex configuration.
+
 ### Ordered fallback list
 
 ```yaml
