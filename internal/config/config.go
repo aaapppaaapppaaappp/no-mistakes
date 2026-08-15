@@ -1089,6 +1089,15 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 		return nil
 	}
 	configured := c.ReviewFixerAgent
+	if len(c.ReviewFixerCommand) > 0 {
+		if configured != types.AgentCodex {
+			return fmt.Errorf("review_fixer_command requires review_fixer_agent: codex")
+		}
+		if _, err := lookPath(c.ReviewFixerCommand[0]); err != nil {
+			return fmt.Errorf("resolve review_fixer_command from %q: %w", c.ReviewFixerCommand[0], err)
+		}
+		return nil
+	}
 	resolved, ok, probe, err := c.resolveConfiguredAgent(ctx, configured, lookPath)
 	if err != nil {
 		return fmt.Errorf("resolve review_fixer_agent: %w", err)
@@ -1097,14 +1106,6 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 		return fmt.Errorf("resolve review_fixer_agent: %w", noRunnableAgentError([]types.AgentName{configured}, []string{probe}))
 	}
 	c.ReviewFixerAgent = resolved
-	if len(c.ReviewFixerCommand) > 0 {
-		if resolved != types.AgentCodex {
-			return fmt.Errorf("review_fixer_command requires review_fixer_agent: codex")
-		}
-		if _, err := lookPath(c.ReviewFixerCommand[0]); err != nil {
-			return fmt.Errorf("resolve review_fixer_command from %q: %w", c.ReviewFixerCommand[0], err)
-		}
-	}
 	return nil
 }
 

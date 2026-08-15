@@ -93,6 +93,31 @@ func TestResolveAgentRequiresReviewFixerCommandToBeRunnable(t *testing.T) {
 	}
 }
 
+func TestResolveAgentReviewFixerCommandSkipsNativeCodexProbe(t *testing.T) {
+	cfg := &Config{
+		Agent:              types.AgentClaude,
+		ReviewFixerAgent:   types.AgentCodex,
+		ReviewFixerCommand: []string{"unsloth", "start", "codex", "--persist"},
+		AgentPathOverride:  map[string]string{"codex": "/stale/codex"},
+	}
+	var probed []string
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		probed = append(probed, bin)
+		switch bin {
+		case "claude", "unsloth":
+			return "/usr/bin/" + bin, nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"claude", "unsloth"}; !reflect.DeepEqual(probed, want) {
+		t.Fatalf("probed executables = %v, want %v", probed, want)
+	}
+}
+
 func TestLoadGlobalRejectsReviewFixerCommandWithoutAgent(t *testing.T) {
 	_, err := LoadGlobalFromBytes([]byte(`
 agent: codex

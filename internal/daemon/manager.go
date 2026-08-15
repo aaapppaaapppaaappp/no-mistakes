@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -255,12 +256,44 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	return cfg, nil
 }
 
-func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
+type pipelineAgentStartStage string
+
+const (
+	pipelineAgentResolveStage        pipelineAgentStartStage = "resolve_agent"
+	pipelineAgentCreateStage         pipelineAgentStartStage = "create_agent"
+	pipelineAgentNeutralizationStage pipelineAgentStartStage = "gate_not_neutralized"
+)
+
+type pipelineAgentStartError struct {
+	stage pipelineAgentStartStage
+	err   error
+}
+
+func (e *pipelineAgentStartError) Error() string { return e.err.Error() }
+func (e *pipelineAgentStartError) Unwrap() error { return e.err }
+
+func pipelineAgentFailure(stage pipelineAgentStartStage, err error) error {
+	return &pipelineAgentStartError{stage: stage, err: err}
+}
+
+func pipelineAgentFailureStage(err error) string {
+	var startErr *pipelineAgentStartError
+	if errors.As(err, &startErr) {
+		return string(startErr.stage)
+	}
+	return string(pipelineAgentCreateStage)
+}
+
+func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environments ...runenv.Overlay) (agent.Agent, error) {
+	environment := runenv.Overlay{}
+	if len(environments) > 0 {
+		environment = environments[0]
+	}
 	if steps.IsDemoMode() {
 		return agent.NewNoop(), nil
 	}
 	if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
-		return nil, err
+		return nil, pipelineAgentFailure(pipelineAgentResolveStage, err)
 	}
 	agents := cfg.Agents
 	if len(agents) == 0 {
@@ -286,7 +319,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 			for _, existing := range created {
 				_ = existing.Close()
 			}
-			return nil, err
+			return nil, pipelineAgentFailure(pipelineAgentCreateStage, err)
 		}
 		created = append(created, next)
 	}
@@ -311,7 +344,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 			fixer, err = createOne(cfg.ReviewFixerAgent, fixerBin, fixerArgs, commandPrefix)
 			if err != nil {
 				_ = ag.Close()
-				return nil, fmt.Errorf("create review fixer agent: %w", err)
+				return nil, pipelineAgentFailure(pipelineAgentCreateStage, fmt.Errorf("create review fixer agent: %w", err))
 			}
 		}
 	}
@@ -322,7 +355,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 	if cfg.DisableProjectSettings {
 		if err := agent.EnsureGateNeutralized(ag); err != nil {
 			_ = ag.Close()
-			return nil, err
+			return nil, pipelineAgentFailure(pipelineAgentNeutralizationStage, err)
 		}
 	}
 	return ag, nil
@@ -1084,7 +1117,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 	ag, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
 	if err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("create_agent")
+		trackStartFailure(pipelineAgentFailureStage(err))
 		return "", err
 	}
 
