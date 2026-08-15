@@ -9,7 +9,7 @@ Every validation run requires a supported native agent binary, the `agent: curso
 The default `agent: auto` setting picks the first supported native agent or ACP alias available on your system.
 
 The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
-Those jobs run in the daemon's disposable worktree through the configured pipeline agent.
+Those jobs run in the daemon's disposable worktree through the configured default agent, except that the existing Review fix turns can use a dedicated global fixer.
 A validation-step agent inspects, fixes, and returns only its assigned phase; delivery requirements in user intent remain acceptance context, but the outer executor alone performs the other validation, push, PR, and CI phases.
 If that step attempts pipeline control, no-mistakes returns `error.code: nested_gate_context`; the agent must return control to the outer executor, while read-only `no-mistakes axi status`, `no-mistakes axi logs`, help, and `no-mistakes doctor` remain available.
 
@@ -54,8 +54,8 @@ That directory is always outside the worktree and is reaped by no-mistakes on a 
 
 ## Runner requirements
 
-A complete gate never degrades silently when its configured pipeline agent is unavailable.
-The daemon resolves the effective agent before creating pipeline step records, and the run fails immediately with setup guidance if the configured binary cannot run.
+A complete gate never degrades silently when a configured pipeline runner is unavailable.
+The daemon resolves the default agent and any dedicated review fixer before creating pipeline step records, and the run fails immediately with setup guidance if a configured binary cannot run.
 This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while rebase, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
 
 | Surface or capability | Works without a runnable pipeline agent? | Behavior |
@@ -199,7 +199,7 @@ The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command an
 When the daemon is running through a managed service, its `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories; on Windows it reuses the current process environment.
 If native agent discovery does not resolve the binary you expect, check `~/.no-mistakes/logs/daemon.log` and set an explicit override; [Environment the daemon sees](/no-mistakes/reference/environment/#environment-the-daemon-sees) owns the full resolution story.
 
-Six global config fields tune resolution and invocation, and the [Global Config Reference](/no-mistakes/reference/global-config/) owns each one:
+These global config fields tune agent resolution and launch, and the [Global Config Reference](/no-mistakes/reference/global-config/) owns each one:
 
 - [`agent_path_override`](/no-mistakes/reference/global-config/#agent_path_override) - custom binary paths per native agent, plus the default native binary-name table.
 - [`agent_config`](/no-mistakes/reference/global-config/#agent_config) - model and reasoning effort per agent in one common spelling, mapped down to each harness's own mechanism, with the full per-harness mapping table and the precedence rule against raw flags.
@@ -207,12 +207,14 @@ Six global config fields tune resolution and invocation, and the [Global Config 
 - [`acpx_path`](/no-mistakes/reference/global-config/#acpx_path) - the bridge binary path for explicit ACP targets and first-class ACP aliases.
 - [`acp_registry_overrides`](/no-mistakes/reference/global-config/#acp_registry_overrides) - raw ACP target commands, including replacements for alias defaults such as `cursor-agent acp`, plus their availability-probing rules.
 - [`agent`](/no-mistakes/reference/global-config/#agent) - the `auto` resolution order and ordered fallback-list semantics.
+- [`review_fixer_agent`](/no-mistakes/reference/global-config/#review_fixer_agent) - optional global routing for the existing Review fix turns.
+- [`review_fixer_command`](/no-mistakes/reference/global-config/#review_fixer_command) - optional Codex fixer launcher argv and its isolated launcher/provider profile.
 
 ## Review session reuse
 
-With the default `session_reuse: true`, Claude, Codex, Grok, Pi, and Antigravity keep one durable review-fixer session per run, and resume failures fall back to a fresh fixer session instead of skipping the fix turn. Pi stores its native fixer transcript in Pi's session directory; no-mistakes persists only the minimum session identity needed to resume it.
+With the default `session_reuse: true`, the effective review fixer keeps one durable session per run when it is Claude, Codex, Grok, Pi, or Antigravity, and resume failures fall back to a fresh fixer session instead of skipping the fix turn. The fixer is the default agent unless `review_fixer_agent` selects a dedicated one. Pi stores its native fixer transcript in Pi's session directory; no-mistakes persists only the minimum session identity needed to resume it.
 Review turns always run in fresh, session-free invocations: a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them.
-The [`session_reuse` field reference](/no-mistakes/reference/global-config/#session_reuse) owns the exact reuse, fallback, privacy, and restart-recovery semantics.
+The [`review_fixer_agent`](/no-mistakes/reference/global-config/#review_fixer_agent) and [`session_reuse`](/no-mistakes/reference/global-config/#session_reuse) references own agent selection and the exact reuse, fallback, privacy, and restart-recovery semantics.
 
 ## Agent interface
 
@@ -273,7 +275,8 @@ For review-fixer reuse, Claude starts a stream-json session and resumes it with 
 
 Spawns a `codex` subprocess for each invocation with `exec --json`. When structured output is requested, no-mistakes also writes a normalized schema file and passes it with `--output-schema`. By default it also adds `--dangerously-bypass-approvals-and-sandbox`, unless you already set your own Codex approval or sandbox flag through `agent_args_override`. Reads JSONL events. Structured output is returned from the final `agent_message` text and uses the common text fallback described above when needed.
 Codex model and reasoning effort belong in global [`agent_config.codex`](/no-mistakes/reference/global-config/#agent_config), which renders them as `-m` and `-c model_reasoning_effort`. Other config overrides, such as `-c service_tier="priority"`, belong in `agent_args_override.codex`.
-For review-fixer reuse, Codex resumes the reported thread with `codex exec resume <id> <prompt>`.
+A Codex fixer launched through [`review_fixer_command`](/no-mistakes/reference/global-config/#review_fixer_command) intentionally ignores `agent_args_override.codex` because its launcher owns that local provider profile.
+For review-fixer reuse, Codex resumes the reported thread with `codex exec resume <id> -` and sends the prompt on stdin.
 That resume command has a narrower flag surface than `codex exec`, so a resume that rejects an override falls back to a fresh fixer session rather than skipping the fix turn.
 
 ## Grok Build
@@ -365,6 +368,6 @@ $ no-mistakes doctor
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
 The standalone `acpx` and `cursor` rows inspect the default binary names.
-The `gate validation` line is the decisive result: when the configured global runner is unavailable, doctor fails because a complete gate cannot validate without it.
+The `gate validation` line is the decisive result: when the configured global default agent or dedicated fixer is unavailable, doctor fails because a complete gate cannot validate without its required runners.
 See the [Global Config Reference](/no-mistakes/reference/global-config/) for ACP availability and probing behavior.
-Every new validation run resolves its effective agent again after applying any trusted repository-level override.
+Every new validation run resolves its default agent and dedicated fixer again after applying any trusted repository-level override to the default agent.

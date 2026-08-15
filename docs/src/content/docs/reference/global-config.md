@@ -146,9 +146,10 @@ and every other pipeline invocation continue to use `agent`.
 | Values  | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
 | Default | Empty (uses `agent`)                                                                        |
 
-This is a global-only operator setting; repositories cannot select a different
-local executable. The configured fixer must resolve to a runnable agent before
-the gate begins.
+When set, this global-only operator setting selects the Review fixer after any
+per-repo default `agent` override; repositories cannot replace the dedicated
+fixer or its launcher. The configured fixer must resolve to a runnable agent
+before the gate begins.
 
 ```yaml
 agent: codex
@@ -165,7 +166,9 @@ another loop or change pipeline order.
 
 Optional launcher argv for a Codex review fixer. no-mistakes appends its managed
 `codex exec ...` arguments after this list. The executable must be available when
-the gate starts.
+the gate starts. The launcher selects the local provider environment; harness-neutral
+[`agent_config.codex`](#agent_config) model and effort settings still become managed
+Codex arguments.
 
 |         |                               |
 | ------- | ----------------------------- |
@@ -173,8 +176,8 @@ the gate starts.
 | Default | Empty (launch Codex directly) |
 
 The launcher process is intentionally isolated from `agent_args_override.codex`.
-This prevents the default reviewer's remote model/provider pins from overriding
-the launcher's local profile. no-mistakes still appends its own execution,
+This prevents the default reviewer's raw remote model/provider pins from overriding
+the launcher's local provider profile. no-mistakes still appends its own execution,
 structured-output, and safety flags after the launcher prefix.
 
 Unsloth's `--persist` keeps its private `CODEX_HOME` stable so the existing
@@ -246,8 +249,8 @@ The wrapper disables discovered Pi extensions and explicitly loads only the no-m
 
 ### agent_path_override
 
-Custom binary paths for native agents.
-When set, `no-mistakes` uses this path instead of looking up the binary on `PATH`.
+Custom binary paths for native agents launched directly by no-mistakes.
+When set, `no-mistakes` uses this path instead of looking up the binary on `PATH`; an explicit [`review_fixer_command`](#review_fixer_command) supplies its own launcher executable instead.
 ACP agents and aliases use `acpx_path` for the bridge; use `acp_registry_overrides` to replace a raw target command such as `cursor-agent acp`.
 
 |         |                                   |
@@ -329,8 +332,9 @@ agent_args_override:
 
 ### agent_args_override
 
-Extra CLI flags to pass to each native agent.
+Extra CLI flags to pass to native agents launched directly by no-mistakes.
 Use this for anything [`agent_config`](#agent_config) does not cover - service tier, permission mode, profiles, or any other flag the underlying agent supports - and as the escape hatch for a harness whose model or effort flag no-mistakes cannot map. For model and reasoning effort on a mapped harness, prefer `agent_config`: one spelling instead of seven.
+A Codex fixer launched through [`review_fixer_command`](#review_fixer_command) intentionally does not receive these raw overrides because its launcher owns the local provider profile.
 
 |         |                                                           |
 | ------- | --------------------------------------------------------- |
@@ -590,7 +594,7 @@ Per-run agent session reuse for the review loop's fixer role.
 | Type    | `bool` |
 | Default | `true` |
 
-When enabled and the pipeline agent supports native session resume (Claude or Grok via `--resume`, Codex via `exec resume`, Pi via `--session <UUID>`, Antigravity via `--conversation <id>`), each run keeps one durable fixer session across its review-fix turns.
+When enabled and the effective review fixer supports native session resume (Claude or Grok via `--resume`, Codex via `exec resume`, Pi via `--session <UUID>`, Antigravity via `--conversation <id>`), each run keeps one durable fixer session across its review-fix turns. The fixer is the default [`agent`](#agent) unless [`review_fixer_agent`](#review_fixer_agent) selects a dedicated one.
 Review turns - the initial full review and every full rereview - always run as fresh, session-free invocations regardless of this setting: a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
 The fixer session is never lent to review turns, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
 When resume is unavailable or fails, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record. Pi emits per-invocation usage after a resume, unlike Codex's cumulative session counters.
