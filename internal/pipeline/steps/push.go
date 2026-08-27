@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
@@ -137,6 +138,51 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		sctx.Run.HeadSHA = headBeingPushed
 		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headBeingPushed); err != nil {
 			return nil, err
+		}
+	}
+
+	// Update the gate mirror's ref so follow-up pushes to the gate proxy
+	// remain fast-forwardable after pipeline rebases.
+	if sctx.Repo != nil && strings.TrimSpace(sctx.GateDir) != "" {
+		gateDir := strings.TrimSpace(sctx.GateDir)
+		if _, statErr := os.Stat(gateDir); statErr != nil {
+			if !os.IsNotExist(statErr) {
+				return nil, fmt.Errorf("stat gate mirror repository: %w", statErr)
+			}
+		} else {
+			if err := git.ValidateBareRepository(ctx, gateDir); err != nil {
+				return nil, fmt.Errorf("update gate mirror ref %s: validate repository: %w", ref, err)
+			}
+
+			if fetchErr := git.FetchRemoteRef(ctx, gateDir, sctx.WorkDir, headBeingPushed, headBeingPushed); fetchErr != nil {
+				return nil, fmt.Errorf("update gate mirror ref %s: fetch pushed head: %w", ref, fetchErr)
+			}
+
+			gateTip, _ := git.Run(ctx, gateDir, "rev-parse", "--verify", ref)
+			gateTip = strings.TrimSpace(gateTip)
+
+			submittedHead := ""
+			if sctx.Run.SubmittedHeadSHA != nil {
+				submittedHead = strings.TrimSpace(*sctx.Run.SubmittedHeadSHA)
+			}
+
+			shouldUpdate := gateTip == "" || gateTip == headBeingPushed || (submittedHead != "" && gateTip == submittedHead)
+			if !shouldUpdate {
+				if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", headBeingPushed, gateTip); err == nil {
+					// Preserve a newer descendant.
+					shouldUpdate = false
+				} else if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", gateTip, headBeingPushed); err == nil {
+					// Fast-forward advance from an older ancestor.
+					shouldUpdate = true
+				} else {
+					return nil, fmt.Errorf("gate mirror ref %s at %s diverged from pushed head %s", ref, gateTip, headBeingPushed)
+				}
+			}
+			if shouldUpdate {
+				if _, updateErr := git.Run(ctx, gateDir, "update-ref", ref, headBeingPushed, gateTip); updateErr != nil {
+					return nil, fmt.Errorf("update gate mirror ref %s to %s: %w", ref, headBeingPushed, updateErr)
+				}
+			}
 		}
 	}
 
