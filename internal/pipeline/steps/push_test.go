@@ -183,6 +183,44 @@ func TestAssertReviewApprovedPushHead_RefusesMissingLegacyState(t *testing.T) {
 	}
 }
 
+func TestAssertReviewApprovedPushHead_UsesStepScopedGit(t *testing.T) {
+	dir, baseSHA, approvedHead := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, approvedHead, config.Commands{})
+	recordReviewApproval(t, sctx, approvedHead)
+	if err := os.WriteFile(filepath.Join(dir, "descendant.txt"), []byte("descendant\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "descendant")
+	proposedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "git")
+	logFile := filepath.Join(t.TempDir(), "git.log")
+	sctx.Env = []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"FAKE_CLI_MODE=git-passthrough",
+		"FAKE_CLI_REAL_GIT=" + realGit,
+		"FAKE_CLI_LOG=" + logFile,
+	}
+
+	if err := assertReviewApprovedPushHead(sctx, proposedHead); err != nil {
+		t.Fatalf("expected descendant approval, got %v", err)
+	}
+	logBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logBytes)
+	if !strings.Contains(logText, "rev-parse --verify") || !strings.Contains(logText, "merge-base --is-ancestor") {
+		t.Fatalf("step-scoped git did not run both continuity checks; log:\n%s", logText)
+	}
+}
+
 func TestPushStep_BindsRemoteAndDatabaseToVerifiedCommitWhenHEADMovesDuringPush(t *testing.T) {
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
