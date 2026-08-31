@@ -173,6 +173,24 @@ acp_registry_overrides:
   local-gemini: node /opt/mock-acp-agent.mjs
 ```
 
+The repository-owned ACP Pi structured-output integration is Ubuntu-only and requires explicit opt-in through its wrapper:
+
+With Node.js 22.19 or newer, install the pinned runtime dependencies from the committed lockfile at the root of a trusted no-mistakes checkout:
+
+```sh
+npm ci --prefix integrations/pi --ignore-scripts
+```
+
+Then configure the absolute path to that same checkout:
+
+```yaml
+agent: acp:pi
+acp_registry_overrides:
+  pi: env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 PI_ACP_PI_COMMAND=/absolute/path/to/no-mistakes/integrations/pi/bin/pi-no-mistakes-acp /absolute/path/to/no-mistakes/integrations/pi/node_modules/.bin/pi-acp
+```
+
+The wrapper disables discovered Pi extensions and explicitly loads only the no-mistakes gate extension for this ACP target. Normal model and authentication configuration remains available, so credentials are not copied, but models that depend on provider extensions are unsupported in this dedicated mode. Keep the trusted source checkout and its installed dependencies at that absolute path. Repeat the pinned install after updating the checkout's lockfile. The [environment reference](/no-mistakes/reference/environment/#no_mistakes_pi_structured_output) owns the opt-in variable's semantics. A valid gate reports an actionable extension error when the runtime dependencies are missing. A completed `structured_output` result is authoritative only when it is the exclusive final tool result; coissued, intervening, or subsequent work discards it and falls back to ordinary final-text schema validation.
+
 ### agent_path_override
 
 Custom binary paths for native agents.

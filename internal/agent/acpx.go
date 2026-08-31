@@ -3,18 +3,29 @@ package agent
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-const acpxScannerMaxTokenSize = 256 * 1024 * 1024
+const (
+	acpxScannerMaxTokenSize    = 256 * 1024 * 1024
+	acpxSchemaMaxBytes         = 1024 * 1024
+	acpxSchemaEnvVar           = "NO_MISTAKES_JSON_SCHEMA_FILE"
+	acpxSchemaDigestEnvVar     = "NO_MISTAKES_JSON_SCHEMA_SHA256"
+	acpxStructuredOutputEnvVar = "NO_MISTAKES_PI_STRUCTURED_OUTPUT"
+)
 
 type acpxAgent struct {
 	bin        string
@@ -43,10 +54,32 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	if len(opts.JSONSchema) > 0 {
 		prompt = buildACPStructuredPrompt(prompt, opts.JSONSchema)
 	}
+	schemaPath, cleanupSchema, err := createACPXSchemaTransport(opts.JSONSchema)
+	if err != nil {
+		return nil, fmt.Errorf("acpx schema transport: %w", err)
+	}
+	defer cleanupSchema()
+
 	args := a.buildArgs(opts)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
+	// Always override ambient transport values. Only this invocation's exact
+	// schema may activate the opt-in Pi extension in the ACP child.
+	schemaDigest := ""
+	if len(opts.JSONSchema) > 0 {
+		sum := sha256.Sum256(opts.JSONSchema)
+		schemaDigest = hex.EncodeToString(sum[:])
+	}
+	structuredOutputEnabled := acpxStructuredOutputOptedIn(a.rawCommand)
+	structuredOutputOptIn := ""
+	if structuredOutputEnabled {
+		structuredOutputOptIn = "1"
+	}
+	cmd.Env = append(a.gitSafeEnv(opts.CWD, opts.Env),
+		acpxSchemaEnvVar+"="+schemaPath,
+		acpxSchemaDigestEnvVar+"="+schemaDigest,
+		acpxStructuredOutputEnvVar+"="+structuredOutputOptIn,
+	)
 	shellenv.ConfigureShellCommand(cmd)
 
 	stdin, err := cmd.StdinPipe()
@@ -73,7 +106,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	}()
 
 	var usage TokenUsage
-	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage)
+	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage, len(opts.JSONSchema) > 0 && structuredOutputEnabled)
 	if err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
@@ -105,7 +138,70 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	return res, err
 }
 
+func acpxStructuredOutputOptedIn(rawCommand string) bool {
+	return strings.HasPrefix(strings.TrimSpace(rawCommand), "env "+acpxStructuredOutputEnvVar+"=1 ")
+}
+
 func (a *acpxAgent) Close() error { return nil }
+
+func createACPXSchemaTransport(schema json.RawMessage) (string, func(), error) {
+	if len(schema) == 0 {
+		return "", func() {}, nil
+	}
+	if len(schema) > acpxSchemaMaxBytes {
+		return "", func() {}, fmt.Errorf("schema exceeds %d-byte limit", acpxSchemaMaxBytes)
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(schema, &root); err != nil {
+		return "", func() {}, fmt.Errorf("schema must be a JSON object: %w", err)
+	}
+	if schemaType, ok := root["type"].(string); !ok || schemaType != "object" {
+		return "", func() {}, fmt.Errorf(`schema root type must be "object"`)
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft7)
+	const schemaURL = "urn:no-mistakes:acpx-schema"
+	if err := compiler.AddResource(schemaURL, root); err != nil {
+		return "", func() {}, fmt.Errorf("invalid JSON Schema: %w", err)
+	}
+	if _, err := compiler.Compile(schemaURL); err != nil {
+		return "", func() {}, fmt.Errorf("invalid JSON Schema: %w", err)
+	}
+
+	tempDir, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return "", func() {}, fmt.Errorf("resolve temporary directory: %w", err)
+	}
+	if !filepath.IsAbs(tempDir) {
+		return "", func() {}, fmt.Errorf("temporary directory is not absolute")
+	}
+	f, err := os.CreateTemp(tempDir, "no-mistakes-acpx-schema-*.json")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := f.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("set owner-only mode: %w", err)
+	}
+	written, err := f.Write(schema)
+	if err != nil || written != len(schema) {
+		_ = f.Close()
+		cleanup()
+		if err != nil {
+			return "", func() {}, fmt.Errorf("write: %w", err)
+		}
+		return "", func() {}, io.ErrShortWrite
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("close: %w", err)
+	}
+	return path, cleanup, nil
+}
 
 func (a *acpxAgent) buildArgs(opts RunOpts) []string {
 	args := make([]string, 0, 12)
@@ -176,6 +272,10 @@ type acpxJSONError struct {
 
 type acpxSessionUpdate struct {
 	SessionUpdate string          `json:"sessionUpdate"`
+	ToolCallID    string          `json:"toolCallId"`
+	Title         string          `json:"title"`
+	Name          string          `json:"name"`
+	Status        string          `json:"status"`
 	Content       json.RawMessage `json:"content"`
 	Text          string          `json:"text"`
 	Used          int             `json:"used"`
@@ -209,11 +309,17 @@ type acpxUsageFields struct {
 	cacheCreationReported         bool
 }
 
-func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage) (string, string, error) {
+func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, acceptStructuredOutput ...bool) (string, string, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), acpxScannerMaxTokenSize)
 	var output strings.Builder
 	var stdoutErr string
+	structuredEnabled := len(acceptStructuredOutput) > 0 && acceptStructuredOutput[0]
+	toolNames := make(map[string]string)
+	activeTools := make(map[string]string)
+	structuredEligible := make(map[string]bool)
+	var structuredOutput string
+	var structuredCallID string
 
 	for scanner.Scan() {
 		select {
@@ -249,16 +355,108 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			if text == "" {
 				continue
 			}
+			acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
+			structuredOutput = ""
+			structuredCallID = ""
 			output.WriteString(text)
 			if onChunk != nil {
 				onChunk(text)
+			}
+		case "tool_call":
+			if structuredEnabled && update.ToolCallID != "" {
+				if structuredOutput != "" {
+					structuredOutput = ""
+					structuredCallID = ""
+				}
+				name := acpxStructuredToolName(update)
+				acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
+				toolNames[update.ToolCallID] = name
+				structuredEligible[update.ToolCallID] = name == "structured_output" && len(activeTools) == 0
+				activeTools[update.ToolCallID] = name
+			}
+		case "tool_call_update":
+			if !structuredEnabled || update.ToolCallID == "" {
+				continue
+			}
+			name, known := toolNames[update.ToolCallID]
+			if !known {
+				name = acpxStructuredToolName(update)
+				acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
+				toolNames[update.ToolCallID] = name
+				structuredEligible[update.ToolCallID] = name == "structured_output" && len(activeTools) == 0
+				activeTools[update.ToolCallID] = name
+			}
+			if structuredOutput != "" && update.ToolCallID != structuredCallID {
+				structuredOutput = ""
+				structuredCallID = ""
+			}
+			if update.Status == "failed" {
+				delete(activeTools, update.ToolCallID)
+				continue
+			}
+			if update.Status != "completed" {
+				continue
+			}
+			delete(activeTools, update.ToolCallID)
+			if name != "structured_output" || !structuredEligible[update.ToolCallID] || len(activeTools) != 0 {
+				continue
+			}
+			text, ok := acpxCompletedToolText(update)
+			if !ok {
+				continue
+			}
+			structuredOutput = text
+			structuredCallID = update.ToolCallID
+		case "agent_thought_chunk":
+			if acpxUpdateText(update) == "" {
+				continue
+			}
+			if structuredEnabled {
+				acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
+				if structuredOutput != "" {
+					structuredOutput = ""
+					structuredCallID = ""
+				}
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return "", stdoutErr, err
 	}
+	if structuredOutput != "" {
+		return structuredOutput, stdoutErr, nil
+	}
 	return output.String(), stdoutErr, nil
+}
+
+func acpxInvalidateActiveStructuredOutput(activeTools map[string]string, structuredEligible map[string]bool) {
+	for id, activeName := range activeTools {
+		if activeName == "structured_output" {
+			structuredEligible[id] = false
+		}
+	}
+}
+
+func acpxStructuredToolName(update acpxSessionUpdate) string {
+	if update.Name != "" {
+		return update.Name
+	}
+	return update.Title
+}
+
+func acpxCompletedToolText(update acpxSessionUpdate) (string, bool) {
+	var content []struct {
+		Type    string `json:"type"`
+		Content struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(update.Content, &content) == nil && len(content) == 1 &&
+		content[0].Type == "content" && content[0].Content.Type == "text" && content[0].Content.Text != "" {
+		return content[0].Content.Text, true
+	}
+	return "", false
 }
 
 func acpxUpdateUsage(update acpxSessionUpdate) TokenUsage {

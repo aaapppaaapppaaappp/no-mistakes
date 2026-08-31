@@ -323,8 +323,14 @@ When the target matches a first-class alias such as `acp:cursor`, no-mistakes su
 Configure custom target commands in the [Global Config Reference](/no-mistakes/reference/global-config/#acp_registry_overrides).
 
 no-mistakes invokes acpx with JSON output, approve-all permissions, denied non-interactive permission prompts, and the repo worktree as `--cwd`.
-Structured output is handled by appending the requested JSON schema to the prompt and validating the final assistant text with the common text fallback described above.
+By default, structured output is handled by appending the requested JSON schema to the prompt and validating the final assistant text with the common text fallback described above.
 A `model` set under [`agent_config`](/no-mistakes/reference/global-config/#agent_config) for an alias or `acp:<target>` is passed as acpx's own `--model`, so ACP targets can be pinned to an explicit model. acpx exposes no reasoning-effort surface, so `effort` is refused for ACP names rather than silently ignored.
+
+### Exact structured output with ACP Pi
+
+Pi's ACP adapter has no native structured-output request field. The repository-owned Ubuntu-only Pi package at `integrations/pi` closes that gap for explicitly opted-in ACP targets.
+
+The [Global Config Reference](/no-mistakes/reference/global-config/#acp_registry_overrides) owns the executable ACP Pi wrapper setup and its constraints.
 
 ## Checking agent availability
 

@@ -14,6 +14,7 @@ tmp/
 
 # Dependency directories
 vendor/
+integrations/pi/node_modules/
 
 # IDE
 .idea/
