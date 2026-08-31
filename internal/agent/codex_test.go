@@ -93,7 +93,7 @@ func TestCodexAgent_BuildCommandArgs_LauncherPrefixBeforeExec(t *testing.T) {
 		bin:           "unsloth",
 		commandPrefix: []string{"start", "codex", "--persist"},
 	}
-	args := ca.buildCommandArgs("fix it", "", "")
+	args := ca.buildCommandArgs("", "")
 
 	wantPrefix := []string{"start", "codex", "--persist", "exec"}
 	if len(args) < len(wantPrefix) {

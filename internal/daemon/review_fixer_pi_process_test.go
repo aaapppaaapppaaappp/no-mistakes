@@ -269,6 +269,7 @@ agent_config:
 	if fix.Provider != "acp:pi-qwen-flash-next-xhigh" || fix.SessionID != "" || fix.Resumed {
 		t.Fatalf("review-fix result = provider %q session %q resumed %t", fix.Provider, fix.SessionID, fix.Resumed)
 	}
+	t.Log("review-fix ACP session: cold-only; supplied session was not resumed or persisted")
 	evidence := run("test-evidence", "test-evidence", "openai-codex", "gpt-5.6-sol", "high", "", 1, nil)
 	if evidence.Provider != "acp:pi-sol-high" {
 		t.Fatalf("non-review provider = %q, want acp:pi-sol-high", evidence.Provider)
@@ -295,4 +296,5 @@ agent_config:
 		t.Fatalf("persistently invalid ACP/Pi result error = %v, want terminal schema validation failure", err)
 	}
 	assertModelCapture("persistently-invalid", invalidModelCapture, "flash-next", "Qwen/Qwen3.8-Flash-Next-FP8", "xhigh", 1)
+	t.Logf("persistently invalid ACP/Pi result rejected by final schema validation: %v", err)
 }
