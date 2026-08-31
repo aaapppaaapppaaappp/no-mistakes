@@ -19,10 +19,11 @@ import (
 )
 
 const (
-	acpxScannerMaxTokenSize = 256 * 1024 * 1024
-	acpxSchemaMaxBytes      = 1024 * 1024
-	acpxSchemaEnvVar        = "NO_MISTAKES_JSON_SCHEMA_FILE"
-	acpxSchemaDigestEnvVar  = "NO_MISTAKES_JSON_SCHEMA_SHA256"
+	acpxScannerMaxTokenSize    = 256 * 1024 * 1024
+	acpxSchemaMaxBytes         = 1024 * 1024
+	acpxSchemaEnvVar           = "NO_MISTAKES_JSON_SCHEMA_FILE"
+	acpxSchemaDigestEnvVar     = "NO_MISTAKES_JSON_SCHEMA_SHA256"
+	acpxStructuredOutputEnvVar = "NO_MISTAKES_PI_STRUCTURED_OUTPUT"
 )
 
 type acpxAgent struct {
@@ -68,9 +69,15 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		sum := sha256.Sum256(opts.JSONSchema)
 		schemaDigest = hex.EncodeToString(sum[:])
 	}
+	structuredOutputEnabled := acpxStructuredOutputOptedIn(a.rawCommand)
+	structuredOutputOptIn := ""
+	if structuredOutputEnabled {
+		structuredOutputOptIn = "1"
+	}
 	cmd.Env = append(a.gitSafeEnv(opts.CWD, opts.Env),
 		acpxSchemaEnvVar+"="+schemaPath,
 		acpxSchemaDigestEnvVar+"="+schemaDigest,
+		acpxStructuredOutputEnvVar+"="+structuredOutputOptIn,
 	)
 	shellenv.ConfigureShellCommand(cmd)
 
@@ -98,7 +105,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	}()
 
 	var usage TokenUsage
-	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage, len(opts.JSONSchema) > 0)
+	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage, len(opts.JSONSchema) > 0 && structuredOutputEnabled)
 	if err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
@@ -128,6 +135,10 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	res, err := finalizeTextResult(a.Name(), text, opts.JSONSchema, usage)
 	emitAgentExited(opts, a.Name(), pid, err)
 	return res, err
+}
+
+func acpxStructuredOutputOptedIn(rawCommand string) bool {
+	return strings.HasPrefix(strings.TrimSpace(rawCommand), "env "+acpxStructuredOutputEnvVar+"=1 ")
 }
 
 func (a *acpxAgent) Close() error { return nil }

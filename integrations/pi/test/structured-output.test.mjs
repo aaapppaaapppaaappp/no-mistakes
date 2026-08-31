@@ -7,8 +7,6 @@ import test from "node:test";
 
 import extension, { MAX_SCHEMA_BYTES } from "../extensions/structured-output.mjs";
 
-const posixTest = process.platform === "win32" ? test.skip : test;
-
 async function withEnvironment(values, fn) {
   const previous = {};
   for (const [key, value] of Object.entries(values)) {
@@ -46,6 +44,7 @@ async function load(schema, env = {}, options = {}) {
     await withEnvironment(
       {
         NO_MISTAKES_GATE: "1",
+        NO_MISTAKES_PI_STRUCTURED_OUTPUT: "1",
         NO_MISTAKES_JSON_SCHEMA_FILE: file?.path,
         NO_MISTAKES_JSON_SCHEMA_SHA256: file?.digest,
         ...env,
@@ -76,6 +75,10 @@ test("ordinary sessions register no structured output surface", async () => {
   }
 });
 
+test("missing explicit opt-in registers no structured output surface", async () => {
+  assert.deepEqual(await load({ type: "object" }, { NO_MISTAKES_PI_STRUCTURED_OUTPUT: undefined }), []);
+});
+
 test("missing, malformed, oversized, and untrusted transports are refused", async () => {
   assert.deepEqual(await load(undefined), []);
   assert.deepEqual(await load("{"), []);
@@ -84,34 +87,47 @@ test("missing, malformed, oversized, and untrusted transports are refused", asyn
   assert.deepEqual(await load({ type: "object" }, { NO_MISTAKES_JSON_SCHEMA_SHA256: "0".repeat(64) }), []);
   assert.deepEqual(await load(`{"type":"object","description":"${"x".repeat(MAX_SCHEMA_BYTES)}"}`), []);
 
-  if (process.platform !== "win32") {
-    const file = schemaFile({ type: "object" }, 0o644);
-    try {
-      const registrations = [];
-      await withEnvironment(
-        {
-          NO_MISTAKES_GATE: "1",
-          NO_MISTAKES_JSON_SCHEMA_FILE: file.path,
-          NO_MISTAKES_JSON_SCHEMA_SHA256: file.digest,
-        },
-        () => extension({ registerTool: (tool) => registrations.push(tool) }),
-      );
-      assert.deepEqual(registrations, []);
-    } finally {
-      file.cleanup();
-    }
+  const file = schemaFile({ type: "object" }, 0o644);
+  try {
+    const registrations = [];
+    await withEnvironment(
+      {
+        NO_MISTAKES_GATE: "1",
+        NO_MISTAKES_PI_STRUCTURED_OUTPUT: "1",
+        NO_MISTAKES_JSON_SCHEMA_FILE: file.path,
+        NO_MISTAKES_JSON_SCHEMA_SHA256: file.digest,
+      },
+      () => extension({ registerTool: (tool) => registrations.push(tool) }),
+    );
+    assert.deepEqual(registrations, []);
+  } finally {
+    file.cleanup();
   }
 });
 
-posixTest("TypeBox refuses a semantically invalid schema", async () => {
+test("TypeBox refuses a semantically invalid schema", async () => {
   assert.deepEqual(await load({ type: "object", required: "summary" }), []);
 });
 
-test("Windows exposes no structured output surface", async () => {
-  assert.deepEqual(await load({ type: "object" }, {}, { platform: "win32" }), []);
+test("transport variables are consumed before extension registration", async () => {
+  const file = schemaFile({ type: "object" });
+  const env = {
+    NO_MISTAKES_GATE: "1",
+    NO_MISTAKES_PI_STRUCTURED_OUTPUT: "1",
+    NO_MISTAKES_JSON_SCHEMA_FILE: file.path,
+    NO_MISTAKES_JSON_SCHEMA_SHA256: file.digest,
+  };
+  try {
+    await extension({ registerTool() {} }, { env });
+    assert.equal(env.NO_MISTAKES_PI_STRUCTURED_OUTPUT, undefined);
+    assert.equal(env.NO_MISTAKES_JSON_SCHEMA_FILE, undefined);
+    assert.equal(env.NO_MISTAKES_JSON_SCHEMA_SHA256, undefined);
+  } finally {
+    file.cleanup();
+  }
 });
 
-posixTest("review and test schemas are registered exactly without interpretation", async () => {
+test("review and test schemas are registered exactly without interpretation", async () => {
   const review = {
     type: "object",
     properties: {
@@ -136,7 +152,7 @@ posixTest("review and test schemas are registered exactly without interpretation
   assert.deepEqual((await load(testSchema))[0].parameters, testSchema);
 });
 
-posixTest("structured_output returns only exact JSON text and terminates", async () => {
+test("structured_output returns only exact JSON text and terminates", async () => {
   const [tool] = await load({
     type: "object",
     properties: { artifacts: { type: "array" }, summary: { type: "string" } },

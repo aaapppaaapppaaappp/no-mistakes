@@ -1,3 +1,5 @@
+//go:build linux
+
 package agent
 
 import (
@@ -9,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -41,9 +42,6 @@ func TestPiStructuredOutputExtensionContract(t *testing.T) {
 }
 
 func TestAcpxPiStructuredOutputTerminatingToolIntegration(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the ACP/Pi structured output extension is intentionally inactive on Windows")
-	}
 	integrationPath := piStructuredOutputIntegrationPath(t)
 	binDir := filepath.Join(integrationPath, "node_modules", ".bin")
 	requirePinned := os.Getenv("NM_REQUIRE_PI_ACP_INTEGRATION") == "1"
@@ -125,7 +123,7 @@ export default function fixtureProvider(pi) {
 
 	wrapperPath := filepath.Join(integrationPath, "bin", "pi-no-mistakes-acp")
 	piCommand := fmt.Sprintf("%q -e %q --provider no-mistakes-fixture --model structured-output --no-session --no-themes --no-context-files --offline", wrapperPath, providerPath)
-	rawCommand := fmt.Sprintf("env PI_ACP_PI_COMMAND=%q %q", piCommand, piACP)
+	rawCommand := fmt.Sprintf("env %s=1 PI_ACP_PI_COMMAND=%q %q", acpxStructuredOutputEnvVar, piCommand, piACP)
 	schema := json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","enum":["through-acp"]}},"required":["summary"],"additionalProperties":false}`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

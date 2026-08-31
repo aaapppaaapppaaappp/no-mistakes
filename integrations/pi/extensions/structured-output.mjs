@@ -7,11 +7,13 @@ import draft07MetaSchema from "./draft-07-meta-schema.mjs";
 const GATE_MARKER = "NO_MISTAKES_GATE";
 const SCHEMA_PATH = "NO_MISTAKES_JSON_SCHEMA_FILE";
 const SCHEMA_DIGEST = "NO_MISTAKES_JSON_SCHEMA_SHA256";
+const STRUCTURED_OUTPUT_OPT_IN = "NO_MISTAKES_PI_STRUCTURED_OUTPUT";
 const MAX_SCHEMA_BYTES = 1024 * 1024;
 
-function loadGateSchema(env = process.env, platform = process.platform) {
-  if (platform === "win32" || typeof process.getuid !== "function") return undefined;
+function loadGateSchema(env = process.env) {
+  if (typeof process.getuid !== "function") return undefined;
   if (env[GATE_MARKER] !== "1") return undefined;
+  if (env[STRUCTURED_OUTPUT_OPT_IN] !== "1") return undefined;
 
   const path = env[SCHEMA_PATH];
   const expectedDigest = env[SCHEMA_DIGEST];
@@ -52,8 +54,8 @@ async function loadTypeBoxCompile() {
   return typebox.Compile;
 }
 
-async function acceptedGateSchema(env, loadCompile = loadTypeBoxCompile, platform = process.platform) {
-  const schema = loadGateSchema(env, platform);
+async function acceptedGateSchema(env, loadCompile = loadTypeBoxCompile) {
+  const schema = loadGateSchema(env);
   if (!schema) return undefined;
   try {
     const Compile = await loadCompile();
@@ -67,10 +69,14 @@ async function acceptedGateSchema(env, loadCompile = loadTypeBoxCompile, platfor
 }
 
 export default async function structuredOutputExtension(pi, options = {}) {
+  const sourceEnv = options.env ?? process.env;
+  const env = { ...sourceEnv };
+  delete sourceEnv[SCHEMA_PATH];
+  delete sourceEnv[SCHEMA_DIGEST];
+  delete sourceEnv[STRUCTURED_OUTPUT_OPT_IN];
   const schema = await acceptedGateSchema(
-    options.env ?? process.env,
+    env,
     options.loadCompile,
-    options.platform ?? process.platform,
   );
   if (!schema) return;
 

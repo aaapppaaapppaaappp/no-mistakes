@@ -68,12 +68,12 @@ jobs:
           go-version-file: go.mod
 
       - uses: actions/setup-node@v4
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         with:
           node-version: 22
 
       - name: Install pinned ACP/Pi test dependencies
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         run: npm ci --prefix integrations/pi --ignore-scripts
 
       # The Windows suite is process-spawn bound, not compute bound: the

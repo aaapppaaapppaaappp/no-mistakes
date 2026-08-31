@@ -173,7 +173,15 @@ acp_registry_overrides:
   local-gemini: node /opt/mock-acp-agent.mjs
 ```
 
-For the repository-owned ACP Pi structured-output package and its optional `PI_ACP_PI_COMMAND` wrapper override, see [Exact structured output with ACP Pi](/no-mistakes/guides/agents/#exact-structured-output-with-acp-pi).
+The repository-owned ACP Pi structured-output integration is Ubuntu-only and requires explicit opt-in through its wrapper:
+
+```yaml
+agent: acp:pi
+acp_registry_overrides:
+  pi: env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 PI_ACP_PI_COMMAND=/absolute/path/to/no-mistakes/integrations/pi/bin/pi-no-mistakes-acp npx pi-acp@0.0.31
+```
+
+The wrapper loads the repository extension only for this ACP target and invokes the same `pi` installation and user profile, so model/provider credentials are not copied. Keep the trusted source checkout at that absolute path. The exact opt-in assignment must be the first `env` assignment so no-mistakes can bind completed `structured_output` tool results to this trusted global configuration. Missing opt-in preserves ordinary ACP final-assistant-text parsing. The extension consumes the opt-in, schema path, and digest before registration so nested Pi processes cannot inherit the transport.
 
 ### agent_path_override
 

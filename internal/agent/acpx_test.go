@@ -670,6 +670,22 @@ func TestParseAcpxJSONEvents_UsesCompletedStructuredOutputToolResult(t *testing.
 	}
 }
 
+func TestParseAcpxJSONEvents_NonOptedAgentKeepsFinalAssistantText(t *testing.T) {
+	events := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"structured_output","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"status\":\"draft\"}"}}]}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"{\"status\":\"complete\"}"}}}`,
+	}, "\n")
+	var usage TokenUsage
+	out, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, false)
+	if err != nil {
+		t.Fatalf("parseAcpxJSONEvents: %v", err)
+	}
+	if out != `{"status":"complete"}` {
+		t.Fatalf("output = %q, want final assistant text", out)
+	}
+}
+
 func TestParseAcpxJSONEvents_IgnoresOtherAndIncompleteToolResults(t *testing.T) {
 	events := strings.Join([]string{
 		`{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"ordinary text"}}}`,

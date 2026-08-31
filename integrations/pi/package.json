@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "description": "Gate-scoped structured final output for no-mistakes ACP Pi agents",
   "keywords": ["pi-package"],
+  "os": ["linux"],
   "type": "module",
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.4",

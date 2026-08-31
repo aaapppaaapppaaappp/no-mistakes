@@ -31,7 +31,7 @@ else
   cat > /dev/null
 fi
 if [ -n "$NM_TEST_ACPX_ENV_FILE" ]; then
-  printf '%s\n%s\n%s\n' "$NO_MISTAKES_GATE" "$NO_MISTAKES_JSON_SCHEMA_FILE" "$NO_MISTAKES_JSON_SCHEMA_SHA256" > "$NM_TEST_ACPX_ENV_FILE"
+  printf '%s\n%s\n%s\n%s\n' "$NO_MISTAKES_GATE" "$NO_MISTAKES_JSON_SCHEMA_FILE" "$NO_MISTAKES_JSON_SCHEMA_SHA256" "$NO_MISTAKES_PI_STRUCTURED_OUTPUT" > "$NM_TEST_ACPX_ENV_FILE"
 fi
 if [ -n "$NM_TEST_ACPX_SCHEMA_COPY" ] && [ -n "$NO_MISTAKES_JSON_SCHEMA_FILE" ]; then
   cat "$NO_MISTAKES_JSON_SCHEMA_FILE" > "$NM_TEST_ACPX_SCHEMA_COPY"
@@ -64,7 +64,7 @@ func TestAcpxAgent_Run_TransportsExactSchemaAndCleansUp(t *testing.T) {
 	stub := writeStubAcpx(t, dir)
 
 	schema := json.RawMessage(`{"type":"object","properties":{"artifacts":{"type":"array","items":{"type":"object","required":["label"]}},"risk_scope":{"type":"string","enum":["source-or-external","pipeline-owned-delivery"]}},"required":["artifacts"]}`)
-	a := &acpxAgent{bin: stub, target: "pi"}
+	a := &acpxAgent{bin: stub, target: "pi", rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 pi-acp"}
 	res, err := a.Run(context.Background(), RunOpts{Prompt: "test", CWD: dir, JSONSchema: schema})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -85,7 +85,7 @@ func TestAcpxAgent_Run_TransportsExactSchemaAndCleansUp(t *testing.T) {
 		t.Fatalf("read child env: %v", err)
 	}
 	envLines := strings.Split(strings.TrimSpace(string(envData)), "\n")
-	if len(envLines) != 3 || envLines[0] != "1" || envLines[1] == "" || len(envLines[2]) != 64 {
+	if len(envLines) != 4 || envLines[0] != "1" || envLines[1] == "" || len(envLines[2]) != 64 || envLines[3] != "1" {
 		t.Fatalf("child gate/schema environment = %q", envLines)
 	}
 	sum := sha256.Sum256(schema)
@@ -174,7 +174,7 @@ func TestAcpxAgent_Run_CursorSpawnsDefaultCommandWithoutOverrides(t *testing.T) 
 			if err != nil {
 				t.Fatalf("stub acpx never recorded env: %v", err)
 			}
-			if string(envData) != "1\n\n\n" {
+			if string(envData) != "1\n\n\n\n" {
 				t.Errorf("unstructured child gate/schema environment = %q, want gate marker and cleared schema transport", envData)
 			}
 
