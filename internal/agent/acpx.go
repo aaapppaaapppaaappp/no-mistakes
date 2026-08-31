@@ -347,11 +347,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			if text == "" {
 				continue
 			}
-			for id, activeName := range activeTools {
-				if activeName == "structured_output" {
-					structuredEligible[id] = false
-				}
-			}
+			acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
 			structuredOutput = ""
 			structuredCallID = ""
 			output.WriteString(text)
@@ -365,11 +361,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 					structuredCallID = ""
 				}
 				name := acpxStructuredToolName(update)
-				for id, activeName := range activeTools {
-					if activeName == "structured_output" {
-						structuredEligible[id] = false
-					}
-				}
+				acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
 				toolNames[update.ToolCallID] = name
 				structuredEligible[update.ToolCallID] = name == "structured_output" && len(activeTools) == 0
 				activeTools[update.ToolCallID] = name
@@ -381,11 +373,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			name, known := toolNames[update.ToolCallID]
 			if !known {
 				name = acpxStructuredToolName(update)
-				for id, activeName := range activeTools {
-					if activeName == "structured_output" {
-						structuredEligible[id] = false
-					}
-				}
+				acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
 				toolNames[update.ToolCallID] = name
 				structuredEligible[update.ToolCallID] = name == "structured_output" && len(activeTools) == 0
 				activeTools[update.ToolCallID] = name
@@ -413,11 +401,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			structuredCallID = update.ToolCallID
 		case "agent_thought_chunk":
 			if structuredEnabled {
-				for id, activeName := range activeTools {
-					if activeName == "structured_output" {
-						structuredEligible[id] = false
-					}
-				}
+				acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
 				if structuredOutput != "" {
 					structuredOutput = ""
 					structuredCallID = ""
@@ -432,6 +416,14 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 		return structuredOutput, stdoutErr, nil
 	}
 	return output.String(), stdoutErr, nil
+}
+
+func acpxInvalidateActiveStructuredOutput(activeTools map[string]string, structuredEligible map[string]bool) {
+	for id, activeName := range activeTools {
+		if activeName == "structured_output" {
+			structuredEligible[id] = false
+		}
+	}
 }
 
 func acpxStructuredToolName(update acpxSessionUpdate) string {
