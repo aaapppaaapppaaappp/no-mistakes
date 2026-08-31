@@ -173,6 +173,8 @@ acp_registry_overrides:
   local-gemini: node /opt/mock-acp-agent.mjs
 ```
 
+For the repository-owned ACP Pi structured-output package and its optional `PI_ACP_PI_COMMAND` wrapper override, see [Exact structured output with ACP Pi](/no-mistakes/guides/agents/#exact-structured-output-with-acp-pi).
+
 ### agent_path_override
 
 Custom binary paths for native agents.

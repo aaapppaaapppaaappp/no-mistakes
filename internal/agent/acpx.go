@@ -3,10 +3,13 @@ package agent
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -14,7 +17,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
-const acpxScannerMaxTokenSize = 256 * 1024 * 1024
+const (
+	acpxScannerMaxTokenSize = 256 * 1024 * 1024
+	acpxSchemaMaxBytes      = 1024 * 1024
+	acpxSchemaEnvVar        = "NO_MISTAKES_JSON_SCHEMA_FILE"
+	acpxSchemaDigestEnvVar  = "NO_MISTAKES_JSON_SCHEMA_SHA256"
+)
 
 type acpxAgent struct {
 	bin        string
@@ -43,10 +51,26 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	if len(opts.JSONSchema) > 0 {
 		prompt = buildACPStructuredPrompt(prompt, opts.JSONSchema)
 	}
+	schemaPath, cleanupSchema, err := createACPXSchemaTransport(opts.JSONSchema)
+	if err != nil {
+		return nil, fmt.Errorf("acpx schema transport: %w", err)
+	}
+	defer cleanupSchema()
+
 	args := a.buildArgs(opts)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
+	// Always override ambient transport values. Only this invocation's exact
+	// schema may activate the opt-in Pi extension in the ACP child.
+	schemaDigest := ""
+	if len(opts.JSONSchema) > 0 {
+		sum := sha256.Sum256(opts.JSONSchema)
+		schemaDigest = hex.EncodeToString(sum[:])
+	}
+	cmd.Env = append(a.gitSafeEnv(opts.CWD, opts.Env),
+		acpxSchemaEnvVar+"="+schemaPath,
+		acpxSchemaDigestEnvVar+"="+schemaDigest,
+	)
 	shellenv.ConfigureShellCommand(cmd)
 
 	stdin, err := cmd.StdinPipe()
@@ -106,6 +130,50 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 }
 
 func (a *acpxAgent) Close() error { return nil }
+
+func createACPXSchemaTransport(schema json.RawMessage) (string, func(), error) {
+	if len(schema) == 0 {
+		return "", func() {}, nil
+	}
+	if len(schema) > acpxSchemaMaxBytes {
+		return "", func() {}, fmt.Errorf("schema exceeds %d-byte limit", acpxSchemaMaxBytes)
+	}
+
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(schema, &root); err != nil {
+		return "", func() {}, fmt.Errorf("schema must be a JSON object: %w", err)
+	}
+	var schemaType string
+	if rawType, ok := root["type"]; !ok || json.Unmarshal(rawType, &schemaType) != nil || schemaType != "object" {
+		return "", func() {}, fmt.Errorf(`schema root type must be "object"`)
+	}
+
+	f, err := os.CreateTemp("", "no-mistakes-acpx-schema-*.json")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := f.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("set owner-only mode: %w", err)
+	}
+	written, err := f.Write(schema)
+	if err != nil || written != len(schema) {
+		_ = f.Close()
+		cleanup()
+		if err != nil {
+			return "", func() {}, fmt.Errorf("write: %w", err)
+		}
+		return "", func() {}, io.ErrShortWrite
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("close: %w", err)
+	}
+	return path, cleanup, nil
+}
 
 func (a *acpxAgent) buildArgs(opts RunOpts) []string {
 	args := make([]string, 0, 12)

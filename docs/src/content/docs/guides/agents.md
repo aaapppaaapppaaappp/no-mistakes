@@ -326,6 +326,25 @@ no-mistakes invokes acpx with JSON output, approve-all permissions, denied non-i
 Structured output is handled by appending the requested JSON schema to the prompt and validating the final assistant text with the common text fallback described above.
 A `model` set under [`agent_config`](/no-mistakes/reference/global-config/#agent_config) for an alias or `acp:<target>` is passed as acpx's own `--model`, so ACP targets can be pinned to an explicit model. acpx exposes no reasoning-effort surface, so `effort` is refused for ACP names rather than silently ignored.
 
+### Exact structured output with ACP Pi
+
+Pi's ACP adapter has no native structured-output request field. The repository-owned Pi package at `integrations/pi` closes that gap for `agent: acp:pi`: no-mistakes also carries each invocation's exact schema in a bounded, owner-only temporary file, and the extension exposes a terminating `structured_output` tool with that schema. The prompt contract and no-mistakes' final schema validation remain in place as independent defenses.
+
+Choose one setup:
+
+1. **Pi package (simplest):** from a trusted no-mistakes source checkout, run `pi install /absolute/path/to/no-mistakes/integrations/pi`, then select `agent: acp:pi`. The extension factory is loaded by other Pi sessions but registers no tool, prompt snippet, or guideline unless both gate inputs are valid.
+2. **ACP-only wrapper:** keep ordinary Pi launches from loading the package and point only the ACP target at the included wrapper:
+
+   ```yaml
+   agent: acp:pi
+   acp_registry_overrides:
+     pi: env PI_ACP_PI_COMMAND=/absolute/path/to/no-mistakes/integrations/pi/bin/pi-no-mistakes-acp npx pi-acp@^0.0.31
+   ```
+
+   The wrapper invokes the same `pi` installation and user profile, so model/provider credentials are not copied. Keep the source checkout at that absolute path. Do not combine this wrapper with a global install of the same extension, because Pi rejects duplicate tool registrations.
+
+The gate marker alone is not authorization. Missing, relative, malformed, unreadable, oversized, non-owner-only, or non-object schema transport results in no extension surface; malformed schemas detected by no-mistakes fail the invocation before ACP starts. This integration is generic and passes the transported root schema directly to Pi rather than maintaining a review-specific schema copy.
+
 ## Checking agent availability
 
 Run `no-mistakes doctor` to inspect individual native and ACP runner binaries and to check the effective global agent configuration:
