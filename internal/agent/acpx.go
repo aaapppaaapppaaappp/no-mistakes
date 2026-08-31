@@ -312,6 +312,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 	structuredEligible := make(map[string]bool)
 	var structuredOutput string
 	var structuredCallID string
+	structuredBatchHasContent := false
 
 	for scanner.Scan() {
 		select {
@@ -348,6 +349,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 				continue
 			}
 			acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
+			structuredBatchHasContent = true
 			structuredOutput = ""
 			structuredCallID = ""
 			output.WriteString(text)
@@ -363,7 +365,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 				name := acpxStructuredToolName(update)
 				acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
 				toolNames[update.ToolCallID] = name
-				structuredEligible[update.ToolCallID] = name == "structured_output" && len(activeTools) == 0
+				structuredEligible[update.ToolCallID] = name == "structured_output" && len(activeTools) == 0 && !structuredBatchHasContent
 				activeTools[update.ToolCallID] = name
 			}
 		case "tool_call_update":
@@ -375,7 +377,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 				name = acpxStructuredToolName(update)
 				acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
 				toolNames[update.ToolCallID] = name
-				structuredEligible[update.ToolCallID] = name == "structured_output" && len(activeTools) == 0
+				structuredEligible[update.ToolCallID] = name == "structured_output" && len(activeTools) == 0 && !structuredBatchHasContent
 				activeTools[update.ToolCallID] = name
 			}
 			if structuredOutput != "" && update.ToolCallID != structuredCallID {
@@ -384,12 +386,18 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			}
 			if update.Status == "failed" {
 				delete(activeTools, update.ToolCallID)
+				if name != "structured_output" {
+					structuredBatchHasContent = false
+				}
 				continue
 			}
 			if update.Status != "completed" {
 				continue
 			}
 			delete(activeTools, update.ToolCallID)
+			if name != "structured_output" {
+				structuredBatchHasContent = false
+			}
 			if name != "structured_output" || !structuredEligible[update.ToolCallID] || len(activeTools) != 0 {
 				continue
 			}
@@ -402,6 +410,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 		case "agent_thought_chunk":
 			if structuredEnabled {
 				acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
+				structuredBatchHasContent = true
 				if structuredOutput != "" {
 					structuredOutput = ""
 					structuredCallID = ""

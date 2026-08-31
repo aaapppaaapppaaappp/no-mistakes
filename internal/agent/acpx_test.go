@@ -656,7 +656,6 @@ func TestParseAcpxJSONEvents_CapturesFirstError(t *testing.T) {
 
 func TestParseAcpxJSONEvents_UsesCompletedStructuredOutputToolResult(t *testing.T) {
 	events := strings.Join([]string{
-		`{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"discarded pre-tool text"}}}`,
 		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"structured_output","status":"in_progress"}}}`,
 		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"done\"}"}}]}}}`,
 	}, "\n")
@@ -667,6 +666,38 @@ func TestParseAcpxJSONEvents_UsesCompletedStructuredOutputToolResult(t *testing.
 	}
 	if out != `{"summary":"done"}` {
 		t.Fatalf("output = %q, want completed structured tool JSON", out)
+	}
+}
+
+func TestParseAcpxJSONEvents_RejectsAssistantContentBeforeStructuredOutput(t *testing.T) {
+	events := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"{\"status\":\"complete\"}"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"status\":\"draft\"}"}}]}}}`,
+	}, "\n")
+	var usage TokenUsage
+	out, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, true)
+	if err != nil {
+		t.Fatalf("parseAcpxJSONEvents: %v", err)
+	}
+	if out != `{"status":"complete"}` {
+		t.Fatalf("output = %q, want pre-call assistant content", out)
+	}
+}
+
+func TestParseAcpxJSONEvents_RejectsThoughtBeforeStructuredOutput(t *testing.T) {
+	events := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","text":"still working"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"status\":\"draft\"}"}}]}}}`,
+	}, "\n")
+	var usage TokenUsage
+	out, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, true)
+	if err != nil {
+		t.Fatalf("parseAcpxJSONEvents: %v", err)
+	}
+	if out != "" {
+		t.Fatalf("output = %q, want no accepted structured output", out)
 	}
 }
 
@@ -706,7 +737,6 @@ func TestParseAcpxJSONEvents_RejectsAssistantContentDuringStructuredOutput(t *te
 
 func TestParseAcpxJSONEvents_RejectsThoughtDuringStructuredOutput(t *testing.T) {
 	events := strings.Join([]string{
-		`{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"{\"status\":\"complete\"}"}}}`,
 		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}`,
 		`{"method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","text":"still working"}}}`,
 		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"status\":\"draft\"}"}}]}}}`,
@@ -716,8 +746,8 @@ func TestParseAcpxJSONEvents_RejectsThoughtDuringStructuredOutput(t *testing.T) 
 	if err != nil {
 		t.Fatalf("parseAcpxJSONEvents: %v", err)
 	}
-	if out != `{"status":"complete"}` {
-		t.Fatalf("output = %q, want earlier assistant content", out)
+	if out != "" {
+		t.Fatalf("output = %q, want no accepted structured output", out)
 	}
 }
 
