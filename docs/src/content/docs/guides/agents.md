@@ -330,6 +330,8 @@ A `model` set under [`agent_config`](/no-mistakes/reference/global-config/#agent
 
 Pi's ACP adapter has no native structured-output request field. The repository-owned Pi package at `integrations/pi` closes that gap for `agent: acp:pi`: no-mistakes also carries each invocation's exact schema in a bounded, owner-only temporary file, and the extension exposes a terminating `structured_output` tool with that schema. The prompt contract and no-mistakes' final schema validation remain in place as independent defenses.
 
+This integration is unavailable on Windows: Node cannot authenticate the temporary file with the POSIX owner and mode checks used by the package, so the extension fails closed without registering the tool or its prompt metadata. Ordinary Pi sessions remain unchanged.
+
 Choose one setup:
 
 1. **Pi package (simplest):** from a trusted no-mistakes source checkout, run `pi install /absolute/path/to/no-mistakes/integrations/pi`, then select `agent: acp:pi`. The extension factory is loaded by other Pi sessions but registers no tool, prompt snippet, or guideline unless both gate inputs are valid.

@@ -9,7 +9,8 @@ const SCHEMA_PATH = "NO_MISTAKES_JSON_SCHEMA_FILE";
 const SCHEMA_DIGEST = "NO_MISTAKES_JSON_SCHEMA_SHA256";
 const MAX_SCHEMA_BYTES = 1024 * 1024;
 
-function loadGateSchema(env = process.env) {
+function loadGateSchema(env = process.env, platform = process.platform) {
+  if (platform === "win32" || typeof process.getuid !== "function") return undefined;
   if (env[GATE_MARKER] !== "1") return undefined;
 
   const path = env[SCHEMA_PATH];
@@ -21,9 +22,7 @@ function loadGateSchema(env = process.env) {
     fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_SCHEMA_BYTES) return undefined;
-    if (typeof process.getuid === "function") {
-      if (stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) return undefined;
-    }
+    if (stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) return undefined;
 
     const bounded = Buffer.alloc(stat.size + 1);
     let bytesRead = 0;
@@ -53,8 +52,8 @@ async function loadTypeBoxCompile() {
   return typebox.Compile;
 }
 
-async function acceptedGateSchema(env, loadCompile = loadTypeBoxCompile) {
-  const schema = loadGateSchema(env);
+async function acceptedGateSchema(env, loadCompile = loadTypeBoxCompile, platform = process.platform) {
+  const schema = loadGateSchema(env, platform);
   if (!schema) return undefined;
   try {
     const Compile = await loadCompile();
@@ -68,7 +67,11 @@ async function acceptedGateSchema(env, loadCompile = loadTypeBoxCompile) {
 }
 
 export default async function structuredOutputExtension(pi, options = {}) {
-  const schema = await acceptedGateSchema(options.env ?? process.env, options.loadCompile);
+  const schema = await acceptedGateSchema(
+    options.env ?? process.env,
+    options.loadCompile,
+    options.platform ?? process.platform,
+  );
   if (!schema) return;
 
   pi.registerTool({

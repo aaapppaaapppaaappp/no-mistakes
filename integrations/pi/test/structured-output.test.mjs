@@ -6,7 +6,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 import extension, { MAX_SCHEMA_BYTES } from "../extensions/structured-output.mjs";
-import draft07MetaSchema from "../extensions/draft-07-meta-schema.mjs";
+
+const posixTest = process.platform === "win32" ? test.skip : test;
 
 async function withEnvironment(values, fn) {
   const previous = {};
@@ -38,12 +39,7 @@ function schemaFile(schema, mode = 0o600) {
   };
 }
 
-function testCompile(schema, accepted) {
-  if (schema === draft07MetaSchema) return { Check: () => accepted };
-  return { Check: () => true };
-}
-
-async function load(schema, env = {}, accepted = true) {
+async function load(schema, env = {}, options = {}) {
   const registrations = [];
   const file = schema === undefined ? undefined : schemaFile(schema);
   try {
@@ -54,11 +50,7 @@ async function load(schema, env = {}, accepted = true) {
         NO_MISTAKES_JSON_SCHEMA_SHA256: file?.digest,
         ...env,
       },
-      () =>
-        extension(
-          { registerTool: (tool) => registrations.push(tool) },
-          { loadCompile: async () => (candidate) => testCompile(candidate, accepted) },
-        ),
+      () => extension({ registerTool: (tool) => registrations.push(tool) }, options),
     );
     return registrations;
   } finally {
@@ -76,11 +68,7 @@ test("ordinary sessions register no structured output surface", async () => {
         NO_MISTAKES_JSON_SCHEMA_FILE: file.path,
         NO_MISTAKES_JSON_SCHEMA_SHA256: file.digest,
       },
-      () =>
-        extension(
-          { registerTool: (tool) => registrations.push(tool) },
-          { loadCompile: async () => (candidate) => testCompile(candidate, true) },
-        ),
+      () => extension({ registerTool: (tool) => registrations.push(tool) }),
     );
     assert.deepEqual(registrations, []);
   } finally {
@@ -93,7 +81,6 @@ test("missing, malformed, oversized, and untrusted transports are refused", asyn
   assert.deepEqual(await load("{"), []);
   assert.deepEqual(await load([]), []);
   assert.deepEqual(await load({ type: "array" }), []);
-  assert.deepEqual(await load({ type: "object", required: "summary" }, {}, false), []);
   assert.deepEqual(await load({ type: "object" }, { NO_MISTAKES_JSON_SCHEMA_SHA256: "0".repeat(64) }), []);
   assert.deepEqual(await load(`{"type":"object","description":"${"x".repeat(MAX_SCHEMA_BYTES)}"}`), []);
 
@@ -107,11 +94,7 @@ test("missing, malformed, oversized, and untrusted transports are refused", asyn
           NO_MISTAKES_JSON_SCHEMA_FILE: file.path,
           NO_MISTAKES_JSON_SCHEMA_SHA256: file.digest,
         },
-        () =>
-          extension(
-            { registerTool: (tool) => registrations.push(tool) },
-            { loadCompile: async () => (candidate) => testCompile(candidate, true) },
-          ),
+        () => extension({ registerTool: (tool) => registrations.push(tool) }),
       );
       assert.deepEqual(registrations, []);
     } finally {
@@ -120,7 +103,15 @@ test("missing, malformed, oversized, and untrusted transports are refused", asyn
   }
 });
 
-test("review and test schemas are registered exactly without interpretation", async () => {
+posixTest("TypeBox refuses a semantically invalid schema", async () => {
+  assert.deepEqual(await load({ type: "object", required: "summary" }), []);
+});
+
+test("Windows exposes no structured output surface", async () => {
+  assert.deepEqual(await load({ type: "object" }, {}, { platform: "win32" }), []);
+});
+
+posixTest("review and test schemas are registered exactly without interpretation", async () => {
   const review = {
     type: "object",
     properties: {
@@ -145,7 +136,7 @@ test("review and test schemas are registered exactly without interpretation", as
   assert.deepEqual((await load(testSchema))[0].parameters, testSchema);
 });
 
-test("structured_output returns only exact JSON text and terminates", async () => {
+posixTest("structured_output returns only exact JSON text and terminates", async () => {
   const [tool] = await load({
     type: "object",
     properties: { artifacts: { type: "array" }, summary: { type: "string" } },

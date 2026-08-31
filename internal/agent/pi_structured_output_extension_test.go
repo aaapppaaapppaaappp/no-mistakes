@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -40,25 +41,30 @@ func TestPiStructuredOutputExtensionContract(t *testing.T) {
 }
 
 func TestAcpxPiStructuredOutputTerminatingToolIntegration(t *testing.T) {
-	acpx, err := exec.LookPath("acpx")
-	if err != nil {
-		t.Skip("acpx is required for the ACP/Pi integration test")
+	if runtime.GOOS == "windows" {
+		t.Skip("the ACP/Pi structured output extension is intentionally inactive on Windows")
 	}
-	if _, err := exec.LookPath("pi"); err != nil {
-		t.Skip("pi is required for the ACP/Pi integration test")
+	integrationPath := piStructuredOutputIntegrationPath(t)
+	binDir := filepath.Join(integrationPath, "node_modules", ".bin")
+	requirePinned := os.Getenv("NM_REQUIRE_PI_ACP_INTEGRATION") == "1"
+	resolveBin := func(name string) string {
+		t.Helper()
+		local := filepath.Join(binDir, name)
+		if info, err := os.Stat(local); err == nil && !info.IsDir() {
+			return local
+		}
+		if requirePinned {
+			t.Fatalf("pinned %s is missing; run npm ci --prefix integrations/pi --ignore-scripts", name)
+		}
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("%s is required for the ACP/Pi integration test", name)
+		}
+		return path
 	}
-	npx, err := exec.LookPath("npx")
-	if err != nil {
-		t.Skip("npx with cached pi-acp 0.0.31 is required for the ACP/Pi integration test")
-	}
-
-	probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer probeCancel()
-	probe := exec.CommandContext(probeCtx, npx, "--offline", "--yes", "pi-acp@0.0.31", "--help")
-	shellenv.ConfigureShellCommand(probe)
-	if output, err := shellenv.CombinedOutputShellCommand(probe); err != nil {
-		t.Skipf("cached pi-acp 0.0.31 is unavailable: %v: %s", err, output)
-	}
+	acpx := resolveBin("acpx")
+	resolveBin("pi")
+	piACP := resolveBin("pi-acp")
 
 	dir := t.TempDir()
 	providerPath := filepath.Join(dir, "fixture-provider.mjs")
@@ -117,18 +123,22 @@ export default function fixtureProvider(pi) {
 		t.Fatal(err)
 	}
 
-	wrapperPath := filepath.Join(piStructuredOutputIntegrationPath(t), "bin", "pi-no-mistakes-acp")
+	wrapperPath := filepath.Join(integrationPath, "bin", "pi-no-mistakes-acp")
 	piCommand := fmt.Sprintf("%q -e %q --provider no-mistakes-fixture --model structured-output --no-session --no-themes --no-context-files --offline", wrapperPath, providerPath)
-	rawCommand := fmt.Sprintf("env PI_ACP_PI_COMMAND=%q %q --offline --yes pi-acp@0.0.31", piCommand, npx)
+	rawCommand := fmt.Sprintf("env PI_ACP_PI_COMMAND=%q %q", piCommand, piACP)
 	schema := json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","enum":["through-acp"]}},"required":["summary"],"additionalProperties":false}`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	a := &acpxAgent{bin: acpx, target: "pi", rawCommand: rawCommand}
 	res, err := a.Run(ctx, RunOpts{
-		Prompt:     "Return the fixture result",
-		CWD:        dir,
-		Env:        []string{"HOME=" + dir, "PI_CODING_AGENT_DIR=" + filepath.Join(dir, ".pi", "agent")},
+		Prompt: "Return the fixture result",
+		CWD:    dir,
+		Env: []string{
+			"HOME=" + dir,
+			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"PI_CODING_AGENT_DIR=" + filepath.Join(dir, ".pi", "agent"),
+		},
 		JSONSchema: schema,
 	})
 	if err != nil {

@@ -67,6 +67,15 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: actions/setup-node@v4
+        if: runner.os != 'Windows'
+        with:
+          node-version: 22
+
+      - name: Install pinned ACP/Pi test dependencies
+        if: runner.os != 'Windows'
+        run: npm ci --prefix integrations/pi --ignore-scripts
+
       # The Windows suite is process-spawn bound, not compute bound: the
       # git-backed packages run thousands of git.exe invocations, and Defender
       # real-time scanning taxes every spawn and every file the temp repos
@@ -98,6 +107,8 @@ jobs:
 
       - name: Test on Unix
         if: runner.os != 'Windows'
+        env:
+          NM_REQUIRE_PI_ACP_INTEGRATION: '1'
         run: go test -race ./...
 
       # Git-heavy packages are the Windows wall floor. Keep this list in lockstep
