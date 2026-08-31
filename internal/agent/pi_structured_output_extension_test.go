@@ -157,11 +157,25 @@ exec %q -e %q --provider no-mistakes-fixture --model structured-output --no-sess
 }
 
 func TestPiStructuredOutputExtensionLoadsInPiRPC(t *testing.T) {
-	if _, err := exec.LookPath("pi"); err != nil {
-		t.Skip("pi is not installed; the extension contract test still covers registration and execution")
+	integrationPath := piStructuredOutputIntegrationPath(t)
+	binDir := filepath.Join(integrationPath, "node_modules", ".bin")
+	piPath := filepath.Join(binDir, "pi")
+	if info, err := os.Stat(piPath); err != nil || info.IsDir() {
+		if os.Getenv("NM_REQUIRE_PI_ACP_INTEGRATION") == "1" {
+			t.Fatalf("pinned executable %s is missing; run npm ci --prefix integrations/pi --ignore-scripts", piPath)
+		}
+		t.Skipf("pinned executable %s is required; run npm ci --prefix integrations/pi --ignore-scripts", piPath)
 	}
 
 	dir := t.TempDir()
+	agentDir := filepath.Join(dir, ".pi", "agent")
+	extensionsDir := filepath.Join(agentDir, "extensions")
+	if err := os.MkdirAll(extensionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extensionsDir, "stale-structured-output.mjs"), []byte(`throw new Error("stale profile extension loaded")`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	schemaPath := filepath.Join(dir, "schema.json")
 	schema := []byte(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`)
 	if err := os.WriteFile(schemaPath, schema, 0o600); err != nil {
@@ -171,7 +185,7 @@ func TestPiStructuredOutputExtensionLoadsInPiRPC(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	wrapperPath := filepath.Join(piStructuredOutputIntegrationPath(t), "bin", "pi-no-mistakes-acp")
+	wrapperPath := filepath.Join(integrationPath, "bin", "pi-no-mistakes-acp")
 	cmd := exec.CommandContext(ctx, wrapperPath,
 		"--mode", "rpc",
 		"--no-session",
@@ -182,6 +196,10 @@ func TestPiStructuredOutputExtensionLoadsInPiRPC(t *testing.T) {
 	cmd.Dir = dir
 	cmd.Env = append(gitSafeEnv(dir),
 		"HOME="+dir,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PI_CODING_AGENT_DIR="+agentDir,
+		"NO_MISTAKES_GATE=1",
+		acpxStructuredOutputEnvVar+"=1",
 		acpxSchemaEnvVar+"="+schemaPath,
 		acpxSchemaDigestEnvVar+"="+hex.EncodeToString(sum[:]),
 	)

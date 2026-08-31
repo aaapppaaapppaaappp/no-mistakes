@@ -308,7 +308,10 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 	var stdoutErr string
 	structuredEnabled := len(acceptStructuredOutput) > 0 && acceptStructuredOutput[0]
 	toolNames := make(map[string]string)
+	activeTools := make(map[string]string)
+	structuredEligible := make(map[string]bool)
 	var structuredOutput string
+	var structuredCallID string
 
 	for scanner.Scan() {
 		select {
@@ -344,32 +347,66 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			if text == "" {
 				continue
 			}
+			structuredOutput = ""
+			structuredCallID = ""
 			output.WriteString(text)
 			if onChunk != nil {
 				onChunk(text)
 			}
 		case "tool_call":
 			if structuredEnabled && update.ToolCallID != "" {
-				toolNames[update.ToolCallID] = acpxStructuredToolName(update)
+				if structuredOutput != "" {
+					structuredOutput = ""
+					structuredCallID = ""
+				}
+				name := acpxStructuredToolName(update)
+				for id, activeName := range activeTools {
+					if activeName == "structured_output" {
+						structuredEligible[id] = false
+					}
+				}
+				toolNames[update.ToolCallID] = name
+				structuredEligible[update.ToolCallID] = name == "structured_output" && len(activeTools) == 0
+				activeTools[update.ToolCallID] = name
 			}
 		case "tool_call_update":
 			if !structuredEnabled || update.ToolCallID == "" {
 				continue
 			}
-			if _, ok := toolNames[update.ToolCallID]; !ok {
-				toolNames[update.ToolCallID] = acpxStructuredToolName(update)
+			name, known := toolNames[update.ToolCallID]
+			if !known {
+				name = acpxStructuredToolName(update)
+				for id, activeName := range activeTools {
+					if activeName == "structured_output" {
+						structuredEligible[id] = false
+					}
+				}
+				toolNames[update.ToolCallID] = name
+				structuredEligible[update.ToolCallID] = name == "structured_output" && len(activeTools) == 0
+				activeTools[update.ToolCallID] = name
 			}
-			if update.Status != "completed" || toolNames[update.ToolCallID] != "structured_output" {
+			if structuredOutput != "" && update.ToolCallID != structuredCallID {
+				structuredOutput = ""
+				structuredCallID = ""
+			}
+			if update.Status != "completed" {
+				continue
+			}
+			delete(activeTools, update.ToolCallID)
+			if name != "structured_output" || !structuredEligible[update.ToolCallID] || len(activeTools) != 0 {
 				continue
 			}
 			text, ok := acpxCompletedToolText(update)
 			if !ok {
 				continue
 			}
-			if structuredOutput != "" && structuredOutput != text {
-				return "", stdoutErr, fmt.Errorf("multiple completed structured_output results")
-			}
 			structuredOutput = text
+			structuredCallID = update.ToolCallID
+		case "agent_thought_chunk":
+			if structuredEnabled && structuredOutput != "" {
+				structuredOutput = ""
+				structuredCallID = ""
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {

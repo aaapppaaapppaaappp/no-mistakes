@@ -2,4 +2,4 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-exec pi -e "$root/extensions/structured-output.mjs" "$@"
+exec pi --no-extensions -e "$root/extensions/structured-output.mjs" "$@"

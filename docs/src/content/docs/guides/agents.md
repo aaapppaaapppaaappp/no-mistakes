@@ -328,11 +328,9 @@ A `model` set under [`agent_config`](/no-mistakes/reference/global-config/#agent
 
 ### Exact structured output with ACP Pi
 
-Pi's ACP adapter has no native structured-output request field. The repository-owned Ubuntu-only Pi package at `integrations/pi` closes that gap for explicitly opted-in ACP targets: no-mistakes also carries each invocation's exact schema in a bounded, owner-only temporary file, and the extension exposes a terminating `structured_output` tool with that schema. The prompt contract and no-mistakes' final schema validation remain in place as independent defenses.
+Pi's ACP adapter has no native structured-output request field. The repository-owned Ubuntu-only Pi package at `integrations/pi` closes that gap for explicitly opted-in ACP targets.
 
 The [Global Config Reference](/no-mistakes/reference/global-config/#acp_registry_overrides) owns the executable ACP Pi wrapper setup and its constraints. Ordinary interactive and RPC Pi sessions remain unchanged.
-
-The gate marker alone is not authorization. Missing, relative, malformed, unreadable, oversized, non-owner-only, or non-object schema transport results in no extension surface; malformed schemas detected by no-mistakes fail the invocation before ACP starts. This integration is generic and passes the transported root schema directly to Pi rather than maintaining a review-specific schema copy.
 
 ## Checking agent availability
 
