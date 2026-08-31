@@ -186,7 +186,7 @@ Then configure the absolute path to that same checkout:
 ```yaml
 agent: acp:pi
 acp_registry_overrides:
-  pi: env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 PI_ACP_PI_COMMAND=/absolute/path/to/no-mistakes/integrations/pi/bin/pi-no-mistakes-acp npx pi-acp@0.0.31
+  pi: env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 PI_ACP_PI_COMMAND=/absolute/path/to/no-mistakes/integrations/pi/bin/pi-no-mistakes-acp /absolute/path/to/no-mistakes/integrations/pi/node_modules/.bin/pi-acp
 ```
 
 The wrapper loads the repository extension only for this ACP target and invokes the same `pi` installation and user profile, so model/provider credentials are not copied. Keep the trusted source checkout and its installed dependencies at that absolute path. Repeat the pinned install after updating the checkout's lockfile. The exact opt-in assignment must be the first `env` assignment so no-mistakes can bind completed `structured_output` tool results to this trusted global configuration. Missing opt-in preserves ordinary ACP final-assistant-text parsing. The extension consumes the opt-in, schema path, and digest before registration so nested Pi processes cannot inherit the transport. A valid gate reports an actionable extension error when the runtime dependencies are missing; ordinary Pi sessions remain silent.

@@ -45,24 +45,18 @@ func TestAcpxPiStructuredOutputTerminatingToolIntegration(t *testing.T) {
 	integrationPath := piStructuredOutputIntegrationPath(t)
 	binDir := filepath.Join(integrationPath, "node_modules", ".bin")
 	requirePinned := os.Getenv("NM_REQUIRE_PI_ACP_INTEGRATION") == "1"
-	resolveBin := func(name string) string {
-		t.Helper()
-		local := filepath.Join(binDir, name)
-		if info, err := os.Stat(local); err == nil && !info.IsDir() {
-			return local
+	acpx := filepath.Join(binDir, "acpx")
+	pi := filepath.Join(binDir, "pi")
+	piACP := filepath.Join(binDir, "pi-acp")
+	for _, path := range []string{acpx, pi, piACP} {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			continue
 		}
 		if requirePinned {
-			t.Fatalf("pinned %s is missing; run npm ci --prefix integrations/pi --ignore-scripts", name)
+			t.Fatalf("pinned executable %s is missing; run npm ci --prefix integrations/pi --ignore-scripts", path)
 		}
-		path, err := exec.LookPath(name)
-		if err != nil {
-			t.Skipf("%s is required for the ACP/Pi integration test", name)
-		}
-		return path
+		t.Skipf("pinned executable %s is required; run npm ci --prefix integrations/pi --ignore-scripts", path)
 	}
-	acpx := resolveBin("acpx")
-	resolveBin("pi")
-	piACP := resolveBin("pi-acp")
 
 	dir := t.TempDir()
 	providerPath := filepath.Join(dir, "fixture-provider.mjs")
