@@ -2,4 +2,9 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-exec pi --no-extensions -e "$root/extensions/structured-output.mjs" "$@"
+pi="$root/node_modules/.bin/pi"
+if [ ! -x "$pi" ]; then
+  echo "no-mistakes structured output dependencies are missing; run \`npm ci --prefix integrations/pi --ignore-scripts\` from the trusted checkout" >&2
+  exit 127
+fi
+exec "$pi" --no-extensions -e "$root/extensions/structured-output.mjs" "$@"

@@ -330,7 +330,7 @@ A `model` set under [`agent_config`](/no-mistakes/reference/global-config/#agent
 
 Pi's ACP adapter has no native structured-output request field. The repository-owned Ubuntu-only Pi package at `integrations/pi` closes that gap for explicitly opted-in ACP targets.
 
-The [Global Config Reference](/no-mistakes/reference/global-config/#acp_registry_overrides) owns the executable ACP Pi wrapper setup and its constraints. Ordinary interactive and RPC Pi sessions remain unchanged.
+The [Global Config Reference](/no-mistakes/reference/global-config/#acp_registry_overrides) owns the executable ACP Pi wrapper setup and its constraints.
 
 ## Checking agent availability
 

@@ -389,6 +389,10 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 				structuredOutput = ""
 				structuredCallID = ""
 			}
+			if update.Status == "failed" {
+				delete(activeTools, update.ToolCallID)
+				continue
+			}
 			if update.Status != "completed" {
 				continue
 			}

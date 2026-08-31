@@ -143,7 +143,6 @@ exec %q -e %q --provider no-mistakes-fixture --model structured-output --no-sess
 		CWD:    dir,
 		Env: []string{
 			"HOME=" + dir,
-			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"PI_CODING_AGENT_DIR=" + filepath.Join(dir, ".pi", "agent"),
 		},
 		JSONSchema: schema,
@@ -196,7 +195,6 @@ func TestPiStructuredOutputExtensionLoadsInPiRPC(t *testing.T) {
 	cmd.Dir = dir
 	cmd.Env = append(gitSafeEnv(dir),
 		"HOME="+dir,
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"PI_CODING_AGENT_DIR="+agentDir,
 		"NO_MISTAKES_GATE=1",
 		acpxStructuredOutputEnvVar+"=1",

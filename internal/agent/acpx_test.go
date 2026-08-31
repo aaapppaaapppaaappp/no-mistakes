@@ -706,6 +706,23 @@ func TestParseAcpxJSONEvents_RejectsStructuredOutputBeforeSubsequentWork(t *test
 	}
 }
 
+func TestParseAcpxJSONEvents_RetiresFailedToolBeforeStructuredOutput(t *testing.T) {
+	events := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"read","title":"read","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"read","status":"failed"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"status\":\"complete\"}"}}]}}}`,
+	}, "\n")
+	var usage TokenUsage
+	out, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, true)
+	if err != nil {
+		t.Fatalf("parseAcpxJSONEvents: %v", err)
+	}
+	if out != `{"status":"complete"}` {
+		t.Fatalf("output = %q, want exclusive final structured output", out)
+	}
+}
+
 func TestParseAcpxJSONEvents_NonOptedAgentKeepsFinalAssistantText(t *testing.T) {
 	events := strings.Join([]string{
 		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"structured_output","status":"in_progress"}}}`,
