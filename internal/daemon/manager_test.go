@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -555,11 +556,18 @@ func TestPushReceivedConcurrentDifferentBranchRunsAvoidSharedConfigLock(t *testi
 	// Drain both start signals regardless of which run won the race to begin,
 	// then confirm both branches have a live, error-free run.
 	gotStarted := make(map[string]bool, len(branches))
+	startTimeout := 3 * time.Second
+	if runtime.GOOS == "windows" {
+		// Reaching the first step includes several git subprocesses. The Windows
+		// git-heavy shard runs packages concurrently, so use the same bound as
+		// waitForRunTerminalState instead of treating normal spawn load as failure.
+		startTimeout = time.Minute
+	}
 	for range branches {
 		select {
 		case b := <-started:
 			gotStarted[b] = true
-		case <-time.After(3 * time.Second):
+		case <-time.After(startTimeout):
 			t.Fatalf("a concurrent run did not start (started so far: %v)", gotStarted)
 		}
 	}
