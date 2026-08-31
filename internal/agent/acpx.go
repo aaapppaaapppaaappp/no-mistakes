@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -168,7 +169,14 @@ func createACPXSchemaTransport(schema json.RawMessage) (string, func(), error) {
 		return "", func() {}, fmt.Errorf("invalid JSON Schema: %w", err)
 	}
 
-	f, err := os.CreateTemp("", "no-mistakes-acpx-schema-*.json")
+	tempDir, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return "", func() {}, fmt.Errorf("resolve temporary directory: %w", err)
+	}
+	if !filepath.IsAbs(tempDir) {
+		return "", func() {}, fmt.Errorf("temporary directory is not absolute")
+	}
+	f, err := os.CreateTemp(tempDir, "no-mistakes-acpx-schema-*.json")
 	if err != nil {
 		return "", func() {}, err
 	}

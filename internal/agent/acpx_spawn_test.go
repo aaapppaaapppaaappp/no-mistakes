@@ -111,6 +111,31 @@ func TestAcpxAgent_Run_TransportsExactSchemaAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestCreateACPXSchemaTransport_UsesAbsolutePathWithRelativeTMPDIR(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempDir := t.TempDir()
+	relativeTempDir, err := filepath.Rel(cwd, tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", relativeTempDir)
+
+	path, cleanup, err := createACPXSchemaTransport(json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`))
+	if err != nil {
+		t.Fatalf("create schema transport: %v", err)
+	}
+	if !filepath.IsAbs(path) {
+		t.Fatalf("schema transport path = %q, want absolute path", path)
+	}
+	cleanup()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("schema transport still exists after cleanup: %v", err)
+	}
+}
+
 func TestAcpxAgent_Run_RefusesInvalidStructuredOutputTransport(t *testing.T) {
 	dir := t.TempDir()
 	stub := writeStubAcpx(t, dir)
