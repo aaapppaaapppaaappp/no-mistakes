@@ -6,8 +6,9 @@ import { join } from "node:path";
 import test from "node:test";
 
 import extension, { MAX_SCHEMA_BYTES } from "../extensions/structured-output.mjs";
+import draft07MetaSchema from "../extensions/draft-07-meta-schema.mjs";
 
-function withEnvironment(values, fn) {
+async function withEnvironment(values, fn) {
   const previous = {};
   for (const [key, value] of Object.entries(values)) {
     previous[key] = process.env[key];
@@ -15,7 +16,7 @@ function withEnvironment(values, fn) {
     else process.env[key] = value;
   }
   try {
-    return fn();
+    return await fn();
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -37,18 +38,27 @@ function schemaFile(schema, mode = 0o600) {
   };
 }
 
-function load(schema, env = {}) {
+function testCompile(schema, accepted) {
+  if (schema === draft07MetaSchema) return { Check: () => accepted };
+  return { Check: () => true };
+}
+
+async function load(schema, env = {}, accepted = true) {
   const registrations = [];
   const file = schema === undefined ? undefined : schemaFile(schema);
   try {
-    withEnvironment(
+    await withEnvironment(
       {
         NO_MISTAKES_GATE: "1",
         NO_MISTAKES_JSON_SCHEMA_FILE: file?.path,
         NO_MISTAKES_JSON_SCHEMA_SHA256: file?.digest,
         ...env,
       },
-      () => extension({ registerTool: (tool) => registrations.push(tool) }),
+      () =>
+        extension(
+          { registerTool: (tool) => registrations.push(tool) },
+          { loadCompile: async () => (candidate) => testCompile(candidate, accepted) },
+        ),
     );
     return registrations;
   } finally {
@@ -56,17 +66,21 @@ function load(schema, env = {}) {
   }
 }
 
-test("ordinary sessions register no structured output surface", () => {
+test("ordinary sessions register no structured output surface", async () => {
   const file = schemaFile({ type: "object" });
   try {
     const registrations = [];
-    withEnvironment(
+    await withEnvironment(
       {
         NO_MISTAKES_GATE: undefined,
         NO_MISTAKES_JSON_SCHEMA_FILE: file.path,
         NO_MISTAKES_JSON_SCHEMA_SHA256: file.digest,
       },
-      () => extension({ registerTool: (tool) => registrations.push(tool) }),
+      () =>
+        extension(
+          { registerTool: (tool) => registrations.push(tool) },
+          { loadCompile: async () => (candidate) => testCompile(candidate, true) },
+        ),
     );
     assert.deepEqual(registrations, []);
   } finally {
@@ -74,25 +88,30 @@ test("ordinary sessions register no structured output surface", () => {
   }
 });
 
-test("missing, malformed, oversized, and untrusted transports are refused", () => {
-  assert.deepEqual(load(undefined), []);
-  assert.deepEqual(load("{"), []);
-  assert.deepEqual(load([]), []);
-  assert.deepEqual(load({ type: "array" }), []);
-  assert.deepEqual(load({ type: "object" }, { NO_MISTAKES_JSON_SCHEMA_SHA256: "0".repeat(64) }), []);
-  assert.deepEqual(load(`{"type":"object","description":"${"x".repeat(MAX_SCHEMA_BYTES)}"}`), []);
+test("missing, malformed, oversized, and untrusted transports are refused", async () => {
+  assert.deepEqual(await load(undefined), []);
+  assert.deepEqual(await load("{"), []);
+  assert.deepEqual(await load([]), []);
+  assert.deepEqual(await load({ type: "array" }), []);
+  assert.deepEqual(await load({ type: "object", required: "summary" }, {}, false), []);
+  assert.deepEqual(await load({ type: "object" }, { NO_MISTAKES_JSON_SCHEMA_SHA256: "0".repeat(64) }), []);
+  assert.deepEqual(await load(`{"type":"object","description":"${"x".repeat(MAX_SCHEMA_BYTES)}"}`), []);
 
   if (process.platform !== "win32") {
     const file = schemaFile({ type: "object" }, 0o644);
     try {
       const registrations = [];
-      withEnvironment(
+      await withEnvironment(
         {
           NO_MISTAKES_GATE: "1",
           NO_MISTAKES_JSON_SCHEMA_FILE: file.path,
           NO_MISTAKES_JSON_SCHEMA_SHA256: file.digest,
         },
-        () => extension({ registerTool: (tool) => registrations.push(tool) }),
+        () =>
+          extension(
+            { registerTool: (tool) => registrations.push(tool) },
+            { loadCompile: async () => (candidate) => testCompile(candidate, true) },
+          ),
       );
       assert.deepEqual(registrations, []);
     } finally {
@@ -101,7 +120,7 @@ test("missing, malformed, oversized, and untrusted transports are refused", () =
   }
 });
 
-test("review and test schemas are registered exactly without interpretation", () => {
+test("review and test schemas are registered exactly without interpretation", async () => {
   const review = {
     type: "object",
     properties: {
@@ -122,12 +141,12 @@ test("review and test schemas are registered exactly without interpretation", ()
     required: ["findings", "artifacts"],
   };
 
-  assert.deepEqual(load(review)[0].parameters, review);
-  assert.deepEqual(load(testSchema)[0].parameters, testSchema);
+  assert.deepEqual((await load(review))[0].parameters, review);
+  assert.deepEqual((await load(testSchema))[0].parameters, testSchema);
 });
 
 test("structured_output returns only exact JSON text and terminates", async () => {
-  const [tool] = load({
+  const [tool] = await load({
     type: "object",
     properties: { artifacts: { type: "array" }, summary: { type: "string" } },
     required: ["artifacts", "summary"],

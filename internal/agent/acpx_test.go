@@ -654,6 +654,39 @@ func TestParseAcpxJSONEvents_CapturesFirstError(t *testing.T) {
 	}
 }
 
+func TestParseAcpxJSONEvents_UsesCompletedStructuredOutputToolResult(t *testing.T) {
+	events := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"discarded pre-tool text"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"structured_output","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"done\"}"}}]}}}`,
+	}, "\n")
+	var usage TokenUsage
+	out, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, true)
+	if err != nil {
+		t.Fatalf("parseAcpxJSONEvents: %v", err)
+	}
+	if out != `{"summary":"done"}` {
+		t.Fatalf("output = %q, want completed structured tool JSON", out)
+	}
+}
+
+func TestParseAcpxJSONEvents_IgnoresOtherAndIncompleteToolResults(t *testing.T) {
+	events := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"ordinary text"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"other","title":"read","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"other","name":"structured_output","status":"in_progress","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"not-final\"}"}}]}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"other","status":"completed","content":[{"type":"content","content":{"type":"text","text":"not structured output"}}]}}}`,
+	}, "\n")
+	var usage TokenUsage
+	out, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, true)
+	if err != nil {
+		t.Fatalf("parseAcpxJSONEvents: %v", err)
+	}
+	if out != "ordinary text" {
+		t.Fatalf("output = %q, want ordinary ACP text", out)
+	}
+}
+
 func TestParseAcpxJSONEvents_SkipsMalformedAndEmptyLines(t *testing.T) {
 	events := strings.Join([]string{
 		"not json at all",

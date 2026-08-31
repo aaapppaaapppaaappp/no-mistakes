@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 const (
@@ -97,7 +98,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	}()
 
 	var usage TokenUsage
-	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage)
+	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage, len(opts.JSONSchema) > 0)
 	if err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
@@ -139,13 +140,21 @@ func createACPXSchemaTransport(schema json.RawMessage) (string, func(), error) {
 		return "", func() {}, fmt.Errorf("schema exceeds %d-byte limit", acpxSchemaMaxBytes)
 	}
 
-	var root map[string]json.RawMessage
+	var root map[string]any
 	if err := json.Unmarshal(schema, &root); err != nil {
 		return "", func() {}, fmt.Errorf("schema must be a JSON object: %w", err)
 	}
-	var schemaType string
-	if rawType, ok := root["type"]; !ok || json.Unmarshal(rawType, &schemaType) != nil || schemaType != "object" {
+	if schemaType, ok := root["type"].(string); !ok || schemaType != "object" {
 		return "", func() {}, fmt.Errorf(`schema root type must be "object"`)
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft7)
+	const schemaURL = "urn:no-mistakes:acpx-schema"
+	if err := compiler.AddResource(schemaURL, root); err != nil {
+		return "", func() {}, fmt.Errorf("invalid JSON Schema: %w", err)
+	}
+	if _, err := compiler.Compile(schemaURL); err != nil {
+		return "", func() {}, fmt.Errorf("invalid JSON Schema: %w", err)
 	}
 
 	f, err := os.CreateTemp("", "no-mistakes-acpx-schema-*.json")
@@ -244,6 +253,10 @@ type acpxJSONError struct {
 
 type acpxSessionUpdate struct {
 	SessionUpdate string          `json:"sessionUpdate"`
+	ToolCallID    string          `json:"toolCallId"`
+	Title         string          `json:"title"`
+	Name          string          `json:"name"`
+	Status        string          `json:"status"`
 	Content       json.RawMessage `json:"content"`
 	Text          string          `json:"text"`
 	Used          int             `json:"used"`
@@ -277,11 +290,14 @@ type acpxUsageFields struct {
 	cacheCreationReported         bool
 }
 
-func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage) (string, string, error) {
+func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, acceptStructuredOutput ...bool) (string, string, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), acpxScannerMaxTokenSize)
 	var output strings.Builder
 	var stdoutErr string
+	structuredEnabled := len(acceptStructuredOutput) > 0 && acceptStructuredOutput[0]
+	toolNames := make(map[string]string)
+	var structuredOutput string
 
 	for scanner.Scan() {
 		select {
@@ -321,12 +337,59 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			if onChunk != nil {
 				onChunk(text)
 			}
+		case "tool_call":
+			if structuredEnabled && update.ToolCallID != "" {
+				toolNames[update.ToolCallID] = acpxStructuredToolName(update)
+			}
+		case "tool_call_update":
+			if !structuredEnabled || update.ToolCallID == "" {
+				continue
+			}
+			if _, ok := toolNames[update.ToolCallID]; !ok {
+				toolNames[update.ToolCallID] = acpxStructuredToolName(update)
+			}
+			if update.Status != "completed" || toolNames[update.ToolCallID] != "structured_output" {
+				continue
+			}
+			text, ok := acpxCompletedToolText(update)
+			if !ok {
+				continue
+			}
+			if structuredOutput != "" && structuredOutput != text {
+				return "", stdoutErr, fmt.Errorf("multiple completed structured_output results")
+			}
+			structuredOutput = text
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return "", stdoutErr, err
 	}
+	if structuredOutput != "" {
+		return structuredOutput, stdoutErr, nil
+	}
 	return output.String(), stdoutErr, nil
+}
+
+func acpxStructuredToolName(update acpxSessionUpdate) string {
+	if update.Name != "" {
+		return update.Name
+	}
+	return update.Title
+}
+
+func acpxCompletedToolText(update acpxSessionUpdate) (string, bool) {
+	var content []struct {
+		Type    string `json:"type"`
+		Content struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(update.Content, &content) == nil && len(content) == 1 &&
+		content[0].Type == "content" && content[0].Content.Type == "text" && content[0].Content.Text != "" {
+		return content[0].Content.Text, true
+	}
+	return "", false
 }
 
 func acpxUpdateUsage(update acpxSessionUpdate) TokenUsage {

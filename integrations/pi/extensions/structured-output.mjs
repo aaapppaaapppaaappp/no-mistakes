@@ -2,6 +2,8 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute } from "node:path";
 
+import draft07MetaSchema from "./draft-07-meta-schema.mjs";
+
 const GATE_MARKER = "NO_MISTAKES_GATE";
 const SCHEMA_PATH = "NO_MISTAKES_JSON_SCHEMA_FILE";
 const SCHEMA_DIGEST = "NO_MISTAKES_JSON_SCHEMA_SHA256";
@@ -46,8 +48,27 @@ function loadGateSchema(env = process.env) {
   }
 }
 
-export default function structuredOutputExtension(pi) {
-  const schema = loadGateSchema();
+async function loadTypeBoxCompile() {
+  const typebox = await import("./typebox-compiler.mjs");
+  return typebox.Compile;
+}
+
+async function acceptedGateSchema(env, loadCompile = loadTypeBoxCompile) {
+  const schema = loadGateSchema(env);
+  if (!schema) return undefined;
+  try {
+    const Compile = await loadCompile();
+    const metaValidator = Compile(draft07MetaSchema);
+    if (!metaValidator.Check(schema)) return undefined;
+    Compile(schema);
+    return schema;
+  } catch {
+    return undefined;
+  }
+}
+
+export default async function structuredOutputExtension(pi, options = {}) {
+  const schema = await acceptedGateSchema(options.env ?? process.env, options.loadCompile);
   if (!schema) return;
 
   pi.registerTool({
@@ -70,4 +91,4 @@ export default function structuredOutputExtension(pi) {
   });
 }
 
-export { MAX_SCHEMA_BYTES, loadGateSchema };
+export { MAX_SCHEMA_BYTES, acceptedGateSchema, loadGateSchema };

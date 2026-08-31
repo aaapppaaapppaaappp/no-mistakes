@@ -39,7 +39,8 @@ fi
 if [ -n "$NM_TEST_ACPX_EVENT" ]; then
   printf '%s\n' "$NM_TEST_ACPX_EVENT"
 elif [ -n "$NO_MISTAKES_JSON_SCHEMA_FILE" ]; then
-  printf '{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"{\\"artifacts\\":[]}"}}}\n'
+  printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured-1","title":"structured_output","status":"in_progress"}}}'
+  printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\\"artifacts\\":[]}"}}]}}}'
 else
   printf '{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"cursor stub reply"}}}\n'
 fi
@@ -122,6 +123,7 @@ func TestAcpxAgent_Run_RefusesInvalidStructuredOutputTransport(t *testing.T) {
 		{name: "malformed", schema: json.RawMessage(`{"type":`)},
 		{name: "non-object root", schema: json.RawMessage(`[]`)},
 		{name: "non-object parameters", schema: json.RawMessage(`{"type":"array"}`)},
+		{name: "invalid required keyword", schema: json.RawMessage(`{"type":"object","required":"summary"}`)},
 		{name: "oversized", schema: json.RawMessage(`{"type":"object","description":"` + strings.Repeat("x", acpxSchemaMaxBytes) + `"}`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
