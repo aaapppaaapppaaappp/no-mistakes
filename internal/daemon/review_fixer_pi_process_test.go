@@ -40,11 +40,12 @@ func TestReviewFixerACPPiProfilesRouteThroughExactSchemaProcesses(t *testing.T) 
 	provider := `import { appendFileSync } from "node:fs";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 
-function model(id, reasoning) {
+function model(id, thinkingLevelMap) {
   return {
     id,
     name: id,
-    reasoning,
+    reasoning: true,
+    thinkingLevelMap,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 32000,
@@ -53,20 +54,52 @@ function model(id, reasoning) {
 }
 
 export default function fixtureProvider(pi) {
+	let turn = 0;
   const register = (provider, models) => pi.registerProvider(provider, {
     baseUrl: "http://127.0.0.1",
     apiKey: "credential-neutral-fixture",
     api: "openai-completions",
     models,
-    streamSimple(selected) {
-      appendFileSync(process.env.NM_PI_MODEL_CAPTURE, JSON.stringify({ provider: selected.provider, model: selected.id }) + "\n");
+    streamSimple(selected, context, options) {
+      turn += 1;
+      appendFileSync(process.env.NM_PI_MODEL_CAPTURE, JSON.stringify({ provider: selected.provider, model: selected.id, reasoning: options?.reasoning, turn }) + "\n");
       const stream = createAssistantMessageEventStream();
       queueMicrotask(() => {
+		if (process.env.NM_PI_SCHEMA_SCENARIO === "persistently-invalid") {
+		  const text = '{"route":"wrong-route"}';
+		  const message = {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: selected.api,
+			provider: selected.provider,
+			model: selected.id,
+			usage: {
+			  input: 1,
+			  output: 1,
+			  cacheRead: 0,
+			  cacheWrite: 0,
+			  totalTokens: 2,
+			  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+			},
+			stopReason: "stop",
+			timestamp: Date.now()
+		  };
+		  stream.push({ type: "start", partial: message });
+		  stream.push({ type: "text_start", contentIndex: 0, partial: message });
+		  stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
+		  stream.push({ type: "text_end", contentIndex: 0, content: text, partial: message });
+		  stream.push({ type: "done", reason: "stop", message });
+		  stream.end();
+		  return;
+		}
+		const route = process.env.NM_PI_SCHEMA_SCENARIO === "invalid-then-valid" && turn === 1
+		  ? "wrong-route"
+		  : selected.provider + "/" + selected.id;
         const toolCall = {
           type: "toolCall",
           id: "structured-output-fixture-call",
           name: "structured_output",
-          arguments: { route: selected.provider + "/" + selected.id }
+		  arguments: { route }
         };
         const message = {
           role: "assistant",
@@ -94,8 +127,8 @@ export default function fixtureProvider(pi) {
       return stream;
     }
   });
-  register("openai-codex", [model("gpt-5.6-sol", true)]);
-  register("flash-next", [model("Qwen/Qwen3.8-Flash-Next-FP8", true)]);
+	register("openai-codex", [model("gpt-5.6-sol", { high: "high" })]);
+	register("flash-next", [model("Qwen/Qwen3.8-Flash-Next-FP8", { xhigh: "xhigh" })]);
 }`
 	if err := os.WriteFile(providerPath, []byte(provider), 0o600); err != nil {
 		t.Fatal(err)
@@ -159,7 +192,32 @@ agent_config:
 	}
 
 	workDir := t.TempDir()
-	run := func(tag, purpose, wantProvider, wantModel, wantThinking string, session *agent.SessionRef) *agent.Result {
+	assertModelCapture := func(tag, path, wantProvider, wantModel, wantThinking string, wantTurns int) {
+		t.Helper()
+		modelData, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read %s model capture: %v", tag, readErr)
+		}
+		lines := strings.Split(strings.TrimSpace(string(modelData)), "\n")
+		if len(lines) != wantTurns {
+			t.Fatalf("%s provider turns = %d, want %d: %s", tag, len(lines), wantTurns, modelData)
+		}
+		for i, line := range lines {
+			var observed struct {
+				Provider  string `json:"provider"`
+				Model     string `json:"model"`
+				Reasoning string `json:"reasoning"`
+				Turn      int    `json:"turn"`
+			}
+			if err := json.Unmarshal([]byte(line), &observed); err != nil {
+				t.Fatalf("parse %s provider turn %d: %v", tag, i+1, err)
+			}
+			if observed.Provider != wantProvider || observed.Model != wantModel || observed.Reasoning != wantThinking || observed.Turn != i+1 {
+				t.Fatalf("%s provider turn %d = %+v, want provider=%q model=%q reasoning=%q", tag, i+1, observed, wantProvider, wantModel, wantThinking)
+			}
+		}
+	}
+	run := func(tag, purpose, wantProvider, wantModel, wantThinking, scenario string, wantTurns int, session *agent.SessionRef) *agent.Result {
 		t.Helper()
 		wantRoute := wantProvider + "/" + wantModel
 		profileCapture := filepath.Join(fixtureDir, tag+"-profile.txt")
@@ -180,6 +238,7 @@ agent_config:
 				"NM_PI_PROFILE_CAPTURE=" + profileCapture,
 				"NM_PI_MODEL_CAPTURE=" + modelCapture,
 				"NM_ACPX_CAPTURE=" + acpxCapture,
+				"NM_PI_SCHEMA_SCENARIO=" + scenario,
 			},
 		})
 		if runErr != nil {
@@ -197,24 +256,43 @@ agent_config:
 		if string(profileData) != wantProfile {
 			t.Fatalf("%s Pi profile = %q, want %q", tag, profileData, wantProfile)
 		}
-		modelData, readErr := os.ReadFile(modelCapture)
-		if readErr != nil {
-			t.Fatalf("read %s model capture: %v", tag, readErr)
-		}
-		t.Logf("%s Pi profile: %s; selected model: %s", tag, strings.TrimSpace(string(profileData)), strings.TrimSpace(string(modelData)))
+		assertModelCapture(tag, modelCapture, wantProvider, wantModel, wantThinking, wantTurns)
+		t.Logf("%s Pi profile: %s; provider turns: %d", tag, strings.TrimSpace(string(profileData)), wantTurns)
 		return result
 	}
 
-	review := run("review", "review", "openai-codex", "gpt-5.6-sol", "high", nil)
+	review := run("review", "review", "openai-codex", "gpt-5.6-sol", "high", "", 1, nil)
 	if review.Provider != "acp:pi-sol-high" {
 		t.Fatalf("review provider = %q, want acp:pi-sol-high", review.Provider)
 	}
-	fix := run("review-fix", "review-fix", "flash-next", "Qwen/Qwen3.8-Flash-Next-FP8", "xhigh", &agent.SessionRef{ID: "must-not-resume", Agent: "acp:pi-qwen-flash-next-xhigh"})
+	fix := run("review-fix", "review-fix", "flash-next", "Qwen/Qwen3.8-Flash-Next-FP8", "xhigh", "invalid-then-valid", 2, &agent.SessionRef{ID: "must-not-resume", Agent: "acp:pi-qwen-flash-next-xhigh"})
 	if fix.Provider != "acp:pi-qwen-flash-next-xhigh" || fix.SessionID != "" || fix.Resumed {
 		t.Fatalf("review-fix result = provider %q session %q resumed %t", fix.Provider, fix.SessionID, fix.Resumed)
 	}
-	evidence := run("test-evidence", "test-evidence", "openai-codex", "gpt-5.6-sol", "high", nil)
+	evidence := run("test-evidence", "test-evidence", "openai-codex", "gpt-5.6-sol", "high", "", 1, nil)
 	if evidence.Provider != "acp:pi-sol-high" {
 		t.Fatalf("non-review provider = %q, want acp:pi-sol-high", evidence.Provider)
 	}
+
+	invalidModelCapture := filepath.Join(fixtureDir, "persistently-invalid-model.jsonl")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = pipelineAgent.Run(ctx, agent.RunOpts{
+		Prompt:     "Return the credential-neutral fixture result",
+		Purpose:    "review-fix",
+		CWD:        workDir,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"route":{"type":"string","enum":["flash-next/Qwen/Qwen3.8-Flash-Next-FP8"]}},"required":["route"],"additionalProperties":false}`),
+		Env: []string{
+			"HOME=" + fixtureDir,
+			"PI_CODING_AGENT_DIR=" + filepath.Join(fixtureDir, ".pi", "agent"),
+			"NM_PI_PROFILE_CAPTURE=" + filepath.Join(fixtureDir, "persistently-invalid-profile.txt"),
+			"NM_PI_MODEL_CAPTURE=" + invalidModelCapture,
+			"NM_ACPX_CAPTURE=" + filepath.Join(fixtureDir, "persistently-invalid-acpx-args"),
+			"NM_PI_SCHEMA_SCENARIO=persistently-invalid",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "output parse") {
+		t.Fatalf("persistently invalid ACP/Pi result error = %v, want terminal schema validation failure", err)
+	}
+	assertModelCapture("persistently-invalid", invalidModelCapture, "flash-next", "Qwen/Qwen3.8-Flash-Next-FP8", "xhigh", 1)
 }
