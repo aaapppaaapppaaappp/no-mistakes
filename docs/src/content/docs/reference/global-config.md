@@ -175,7 +175,7 @@ acp_registry_overrides:
 
 The repository-owned ACP Pi structured-output integration is Ubuntu-only and requires explicit opt-in through its wrapper:
 
-From the root of a trusted no-mistakes checkout, install its pinned runtime dependencies from the committed lockfile:
+With Node.js 22.19 or newer, install the pinned runtime dependencies from the committed lockfile at the root of a trusted no-mistakes checkout:
 
 ```sh
 npm ci --prefix integrations/pi --ignore-scripts

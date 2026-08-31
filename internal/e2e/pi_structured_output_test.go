@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,36 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestPiStructuredOutputWrapperReportsMissingPinnedRuntime(t *testing.T) {
+	integrationPath, err := filepath.Abs(filepath.Join("..", "..", "integrations", "pi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapperPath := filepath.Join(binDir, "pi-no-mistakes-acp")
+	if err := os.Symlink(filepath.Join(integrationPath, "bin", "pi-no-mistakes-acp"), wrapperPath); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, wrapperPath, "--version")
+	shellenv.ConfigureShellCommand(cmd)
+	output, err := shellenv.CombinedOutputShellCommand(cmd)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 127 {
+		t.Fatalf("wrapper error = %v, output = %q; want exit 127", err, output)
+	}
+	want := "no-mistakes structured output dependencies are missing; run `npm ci --prefix integrations/pi --ignore-scripts` from the trusted checkout\n"
+	if string(output) != want {
+		t.Fatalf("wrapper output = %q, want %q", output, want)
+	}
+}
 
 func TestAcpxPiStructuredOutputTerminatingToolIntegration(t *testing.T) {
 	integrationPath, err := filepath.Abs(filepath.Join("..", "..", "integrations", "pi"))
@@ -134,6 +165,7 @@ exec %q -e %q --provider no-mistakes-fixture --model structured-output --no-sess
 	if res.Text != `{"summary":"through-acp"}` {
 		t.Fatalf("result text = %q, want terminating tool JSON", res.Text)
 	}
+	t.Logf("ACP/Pi terminating structured output: %s", res.Text)
 }
 
 func TestPiStructuredOutputExtensionLoadsInPiRPC(t *testing.T) {

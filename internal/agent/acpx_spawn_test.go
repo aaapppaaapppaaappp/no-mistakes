@@ -40,7 +40,7 @@ if [ -n "$NM_TEST_ACPX_EVENT" ]; then
   printf '%s\n' "$NM_TEST_ACPX_EVENT"
 elif [ -n "$NO_MISTAKES_JSON_SCHEMA_FILE" ]; then
   printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured-1","title":"structured_output","status":"in_progress"}}}'
-  printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\\"artifacts\\":[]}"}}]}}}'
+  printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"artifacts\":[]}"}}]}}}'
 else
   printf '{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"cursor stub reply"}}}\n'
 fi
