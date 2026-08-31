@@ -258,6 +258,10 @@ type InvocationWorkload struct {
 type Options struct {
 	ACPRegistryOverrides map[string]string
 	Environment          runenv.Overlay
+	// CommandPrefix inserts launcher arguments before an adapter's managed
+	// arguments. It is currently supported by Codex so a compatible launcher
+	// such as `unsloth start codex --persist` can wrap `codex exec ...`.
+	CommandPrefix []string
 	// DisableProjectSettings, when true, asks a supported adapter (codex,
 	// claude, pi) to launch with the target repo's project-level agent
 	// settings/instructions suppressed. It is the resolved, trusted-only opt-out
@@ -1069,7 +1073,7 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 	case types.AgentClaude:
 		return &claudeAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, subprocessContext: newSubprocessContext(opts.Environment)}, nil
 	case types.AgentCodex:
-		return &codexAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, subprocessContext: newSubprocessContext(opts.Environment)}, nil
+		return &codexAgent{bin: bin, commandPrefix: append([]string(nil), opts.CommandPrefix...), extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, subprocessContext: newSubprocessContext(opts.Environment)}, nil
 	case types.AgentGrok:
 		return &grokAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, subprocessContext: newSubprocessContext(opts.Environment)}, nil
 	case types.AgentRovoDev:

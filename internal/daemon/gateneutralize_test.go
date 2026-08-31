@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -14,6 +15,25 @@ import (
 // fakeLookPath makes every probed agent binary resolve, so agent resolution is
 // deterministic and independent of what is installed on the test host.
 func fakeLookPath(bin string) (string, error) { return "/fake/bin/" + bin, nil }
+
+func TestNewPipelineAgentClassifiesStartupFailures(t *testing.T) {
+	missing := func(bin string) (string, error) {
+		return "", errors.New("missing " + bin)
+	}
+	if _, err := newPipelineAgent(context.Background(), &config.Config{Agent: types.AgentCodex}, t.TempDir(), missing); pipelineAgentFailureStage(err) != "resolve_agent" {
+		t.Fatalf("resolution failure stage = %q, want resolve_agent", pipelineAgentFailureStage(err))
+	}
+
+	cfg := &config.Config{Agent: types.AgentOpenCode, DisableProjectSettings: true}
+	if _, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath); pipelineAgentFailureStage(err) != "gate_not_neutralized" {
+		t.Fatalf("neutralization failure stage = %q, want gate_not_neutralized", pipelineAgentFailureStage(err))
+	}
+
+	createErr := pipelineAgentFailure(pipelineAgentCreateStage, errors.New("create failed"))
+	if got := pipelineAgentFailureStage(createErr); got != "create_agent" {
+		t.Fatalf("creation failure stage = %q, want create_agent", got)
+	}
+}
 
 // TestNewPipelineAgent_OptOut_AdmitsVerifiedHarness proves that under the trusted
 // opt-out (disable_project_settings=true), a verified harness passes the gate and

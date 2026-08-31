@@ -147,6 +147,8 @@ type GlobalConfig struct {
 	// by path ancestry and therefore never reaches a worktree under NM_HOME.
 	// Placement is resolved for every consumer in internal/worktrees.
 	WorktreeRoots           map[string]string `yaml:"worktree_roots"`
+	ReviewFixerAgent        types.AgentName   `yaml:"review_fixer_agent"`
+	ReviewFixerCommand      []string          `yaml:"review_fixer_command"`
 	CITimeout               time.Duration     `yaml:"-"`
 	StepQuietWarning        time.Duration     `yaml:"-"`
 	AgentTimeout            time.Duration     `yaml:"-"`
@@ -194,6 +196,8 @@ type globalConfigRaw struct {
 	AgentArgsOverride       map[string][]string        `yaml:"agent_args_override"`
 	AgentConfig             map[string]agentProfileRaw `yaml:"agent_config"`
 	WorktreeRoots           map[string]string          `yaml:"worktree_roots"`
+	ReviewFixerAgent        types.AgentName            `yaml:"review_fixer_agent"`
+	ReviewFixerCommand      []string                   `yaml:"review_fixer_command"`
 	CITimeout               string                     `yaml:"ci_timeout"`
 	DaemonConnectTimeout    string                     `yaml:"daemon_connect_timeout"`
 	BranchSyncRemoteTimeout string                     `yaml:"branch_sync_remote_timeout"`
@@ -551,6 +555,8 @@ type Config struct {
 	AgentPathOverride     map[string]string
 	AgentArgsOverride     map[string][]string
 	AgentConfig           map[string]agentcfg.Profile
+	ReviewFixerAgent      types.AgentName
+	ReviewFixerCommand    []string
 	CITimeout             time.Duration
 	StepQuietWarning      time.Duration
 	AgentTimeout          time.Duration
@@ -793,6 +799,13 @@ const defaultConfigYAML = `# no-mistakes global configuration
 # "acp:cursor" also uses that Cursor default command
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
+
+# Optional dedicated agent for review fix turns. Review and every other
+# pipeline invocation continue to use the default agent above. A Codex-compatible
+# launcher command is prepended before codex exec; its fixer process does not
+# inherit agent_args_override.codex.
+# review_fixer_agent: codex
+# review_fixer_command: [unsloth, start, codex, --persist]
 
 # Optional path to the user-installed acpx binary for acp:<target> agents and ACP aliases
 # acpx_path: acpx
@@ -1069,6 +1082,34 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 // identity, and kept as fallbacks. The lookPath function should behave like
 // exec.LookPath.
 func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string, error)) error {
+	if err := c.resolveDefaultAgent(ctx, lookPath); err != nil {
+		return err
+	}
+	if c.ReviewFixerAgent == "" {
+		return nil
+	}
+	configured := c.ReviewFixerAgent
+	if len(c.ReviewFixerCommand) > 0 {
+		if configured != types.AgentCodex {
+			return fmt.Errorf("review_fixer_command requires review_fixer_agent: codex")
+		}
+		if _, err := lookPath(c.ReviewFixerCommand[0]); err != nil {
+			return fmt.Errorf("resolve review_fixer_command from %q: %w", c.ReviewFixerCommand[0], err)
+		}
+		return nil
+	}
+	resolved, ok, probe, err := c.resolveConfiguredAgent(ctx, configured, lookPath)
+	if err != nil {
+		return fmt.Errorf("resolve review_fixer_agent: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("resolve review_fixer_agent: %w", noRunnableAgentError([]types.AgentName{configured}, []string{probe}))
+	}
+	c.ReviewFixerAgent = resolved
+	return nil
+}
+
+func (c *Config) resolveDefaultAgent(ctx context.Context, lookPath func(string) (string, error)) error {
 	candidates := c.configuredAgents()
 	if len(candidates) <= 1 {
 		c.Agent = firstAgent(candidates)
@@ -1857,6 +1898,20 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.WorktreeRoots = raw.WorktreeRoots
 	}
+	if raw.ReviewFixerAgent != "" {
+		cfg.ReviewFixerAgent = raw.ReviewFixerAgent
+	}
+	if len(raw.ReviewFixerCommand) > 0 {
+		if raw.ReviewFixerAgent == "" {
+			return nil, fmt.Errorf("parse global config: review_fixer_command requires review_fixer_agent")
+		}
+		for i, arg := range raw.ReviewFixerCommand {
+			if strings.TrimSpace(arg) == "" {
+				return nil, fmt.Errorf("parse global config: review_fixer_command[%d] must not be empty", i)
+			}
+		}
+		cfg.ReviewFixerCommand = append([]string(nil), raw.ReviewFixerCommand...)
+	}
 	timeoutValue := raw.CITimeout
 	if timeoutValue == "" {
 		timeoutValue = raw.BabysitTimeout
@@ -2602,6 +2657,8 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		AgentPathOverride:     global.AgentPathOverride,
 		AgentArgsOverride:     global.AgentArgsOverride,
 		AgentConfig:           global.AgentConfig,
+		ReviewFixerAgent:      global.ReviewFixerAgent,
+		ReviewFixerCommand:    append([]string(nil), global.ReviewFixerCommand...),
 		CITimeout:             global.CITimeout,
 		StepQuietWarning:      global.StepQuietWarning,
 		AgentTimeout:          global.AgentTimeout,

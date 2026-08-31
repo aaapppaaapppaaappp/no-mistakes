@@ -19,8 +19,9 @@ import (
 
 // codexAgent spawns the codex CLI for each invocation.
 type codexAgent struct {
-	bin       string
-	extraArgs []string
+	bin           string
+	commandPrefix []string
+	extraArgs     []string
 	subprocessContext
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses codex's project-level settings/instructions surface.
@@ -90,7 +91,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	if opts.Session != nil {
 		resumeID = opts.Session.ID
 	}
-	args := a.buildArgs(schemaPath, resumeID)
+	args := a.buildCommandArgs(schemaPath, resumeID)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = strings.NewReader(opts.Prompt)
@@ -158,6 +159,11 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 }
 
 func (a *codexAgent) Close() error { return nil }
+
+func (a *codexAgent) buildCommandArgs(schemaPath, resumeID string) []string {
+	args := append([]string(nil), a.commandPrefix...)
+	return append(args, a.buildArgs(schemaPath, resumeID)...)
+}
 
 // buildArgs constructs the codex CLI arguments. User-supplied extraArgs are
 // inserted between "exec" and the stdin prompt marker so user flags (e.g. -m, --sandbox)
