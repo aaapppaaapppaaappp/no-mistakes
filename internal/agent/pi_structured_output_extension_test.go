@@ -120,10 +120,25 @@ export default function fixtureProvider(pi) {
 	if err := os.WriteFile(providerPath, []byte(provider), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fixtureScope := filepath.Join(dir, "node_modules", "@earendil-works")
+	if err := os.MkdirAll(fixtureScope, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	piAIPath := filepath.Join(integrationPath, "node_modules", "@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai")
+	if err := os.Symlink(piAIPath, filepath.Join(fixtureScope, "pi-ai")); err != nil {
+		t.Fatal(err)
+	}
 
 	wrapperPath := filepath.Join(integrationPath, "bin", "pi-no-mistakes-acp")
-	piCommand := fmt.Sprintf("%q -e %q --provider no-mistakes-fixture --model structured-output --no-session --no-themes --no-context-files --offline", wrapperPath, providerPath)
-	rawCommand := fmt.Sprintf("env %s=1 PI_ACP_PI_COMMAND=%q %q", acpxStructuredOutputEnvVar, piCommand, piACP)
+	fixtureWrapperPath := filepath.Join(dir, "pi-fixture")
+	fixtureWrapper := fmt.Sprintf(`#!/bin/sh
+set -eu
+exec %q -e %q --provider no-mistakes-fixture --model structured-output --no-session --no-themes --no-context-files --offline "$@"
+`, wrapperPath, providerPath)
+	if err := os.WriteFile(fixtureWrapperPath, []byte(fixtureWrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rawCommand := fmt.Sprintf("env %s=1 PI_ACP_PI_COMMAND=%q %q", acpxStructuredOutputEnvVar, fixtureWrapperPath, piACP)
 	schema := json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","enum":["through-acp"]}},"required":["summary"],"additionalProperties":false}`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -75,8 +75,36 @@ test("ordinary sessions register no structured output surface", async () => {
   }
 });
 
+test("ordinary sessions remain silent when runtime dependencies are unavailable", async () => {
+  const registrations = [];
+  await withEnvironment(
+    {
+      NO_MISTAKES_GATE: undefined,
+      NO_MISTAKES_PI_STRUCTURED_OUTPUT: undefined,
+      NO_MISTAKES_JSON_SCHEMA_FILE: undefined,
+      NO_MISTAKES_JSON_SCHEMA_SHA256: undefined,
+    },
+    () => extension(
+      { registerTool: (tool) => registrations.push(tool) },
+      { loadCompile: async () => { throw new Error("missing module"); } },
+    ),
+  );
+  assert.deepEqual(registrations, []);
+});
+
 test("missing explicit opt-in registers no structured output surface", async () => {
   assert.deepEqual(await load({ type: "object" }, { NO_MISTAKES_PI_STRUCTURED_OUTPUT: undefined }), []);
+});
+
+test("valid gate reports missing runtime dependencies", async () => {
+  await assert.rejects(
+    load(
+      { type: "object" },
+      {},
+      { loadCompile: async () => { throw new Error("missing module"); } },
+    ),
+    /npm ci --prefix integrations\/pi --ignore-scripts/,
+  );
 });
 
 test("missing, malformed, oversized, and untrusted transports are refused", async () => {

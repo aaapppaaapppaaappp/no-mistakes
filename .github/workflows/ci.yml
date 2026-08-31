@@ -72,7 +72,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install pinned ACP/Pi test dependencies
+      - name: Install documented pinned ACP/Pi dependencies
         if: runner.os == 'Linux'
         run: npm ci --prefix integrations/pi --ignore-scripts
 

@@ -57,8 +57,16 @@ async function loadTypeBoxCompile() {
 async function acceptedGateSchema(env, loadCompile = loadTypeBoxCompile) {
   const schema = loadGateSchema(env);
   if (!schema) return undefined;
+  let Compile;
   try {
-    const Compile = await loadCompile();
+    Compile = await loadCompile();
+  } catch (error) {
+    throw new Error(
+      "no-mistakes structured output dependencies are missing; run `npm ci --prefix integrations/pi --ignore-scripts` from the trusted checkout",
+      { cause: error },
+    );
+  }
+  try {
     const metaValidator = Compile(draft07MetaSchema);
     if (!metaValidator.Check(schema)) return undefined;
     Compile(schema);
