@@ -4,14 +4,19 @@ package e2e
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -128,5 +133,65 @@ exec %q -e %q --provider no-mistakes-fixture --model structured-output --no-sess
 	}
 	if res.Text != `{"summary":"through-acp"}` {
 		t.Fatalf("result text = %q, want terminating tool JSON", res.Text)
+	}
+}
+
+func TestPiStructuredOutputExtensionLoadsInPiRPC(t *testing.T) {
+	integrationPath, err := filepath.Abs(filepath.Join("..", "..", "integrations", "pi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	piPath := filepath.Join(integrationPath, "node_modules", ".bin", "pi")
+	if info, statErr := os.Stat(piPath); statErr != nil || info.IsDir() {
+		t.Fatalf("pinned executable %s is missing; run npm ci --prefix integrations/pi --ignore-scripts", piPath)
+	}
+
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, ".pi", "agent")
+	extensionsDir := filepath.Join(agentDir, "extensions")
+	if err := os.MkdirAll(extensionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extensionsDir, "stale-structured-output.mjs"), []byte(`throw new Error("stale profile extension loaded")`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	schemaPath := filepath.Join(dir, "schema.json")
+	schema := []byte(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`)
+	if err := os.WriteFile(schemaPath, schema, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(schema)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	wrapperPath := filepath.Join(integrationPath, "bin", "pi-no-mistakes-acp")
+	cmd := exec.CommandContext(ctx, wrapperPath,
+		"--mode", "rpc",
+		"--no-session",
+		"--no-themes",
+		"--no-context-files",
+		"--offline",
+	)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"HOME="+dir,
+		"PI_CODING_AGENT_DIR="+agentDir,
+		"NO_MISTAKES_GATE=1",
+		"NO_MISTAKES_PI_STRUCTURED_OUTPUT=1",
+		"NO_MISTAKES_JSON_SCHEMA_FILE="+schemaPath,
+		"NO_MISTAKES_JSON_SCHEMA_SHA256="+hex.EncodeToString(sum[:]),
+	)
+	cmd.Stdin = strings.NewReader("{\"id\":\"probe\",\"type\":\"get_state\"}\n")
+	shellenv.ConfigureShellCommand(cmd)
+	output, err := shellenv.CombinedOutputShellCommand(cmd)
+	if err != nil {
+		t.Fatalf("Pi RPC extension probe: %v\n%s", err, output)
+	}
+	text := string(output)
+	if !strings.Contains(text, `"id":"probe"`) || !strings.Contains(text, `"success":true`) {
+		t.Fatalf("Pi RPC extension probe returned no successful response: %s", text)
+	}
+	if strings.Contains(text, "extension_error") {
+		t.Fatalf("Pi rejected the transported schema extension: %s", text)
 	}
 }
