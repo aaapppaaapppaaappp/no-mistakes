@@ -168,6 +168,17 @@ Disable background update checks.
 
 Update checks run on every CLI invocation except `update` itself and version queries (`--version` / `-v`, which stay side-effect-free), hit GitHub releases, cache the result in `$NM_HOME/update-check.json`, and print a one-line notification to stderr when a newer version is available. Dev builds (non-semver versions) suppress the check automatically.
 
+## `NO_MISTAKES_PI_STRUCTURED_OUTPUT`
+
+Explicitly opt an ACP target into the repository-owned Ubuntu Pi structured-output extension.
+
+|         |                                                   |
+| ------- | ------------------------------------------------- |
+| Type    | `1` to opt in, anything else to remain inactive   |
+| Default | unset                                             |
+
+Set this only as the first `env` assignment in a trusted global [`acp_registry_overrides`](/no-mistakes/reference/global-config/#acp_registry_overrides) command. no-mistakes uses that trusted command provenance before accepting a completed `structured_output` tool result. The extension consumes the variable at load time so child Pi sessions do not inherit the opt-in. It is containment context, not authorization by itself.
+
 ## `XDG_DATA_HOME`
 
 Data directory used to discover OpenCode transcripts for intent extraction.

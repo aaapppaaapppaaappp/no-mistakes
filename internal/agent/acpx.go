@@ -347,6 +347,11 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			if text == "" {
 				continue
 			}
+			for id, activeName := range activeTools {
+				if activeName == "structured_output" {
+					structuredEligible[id] = false
+				}
+			}
 			structuredOutput = ""
 			structuredCallID = ""
 			output.WriteString(text)
@@ -407,9 +412,16 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			structuredOutput = text
 			structuredCallID = update.ToolCallID
 		case "agent_thought_chunk":
-			if structuredEnabled && structuredOutput != "" {
-				structuredOutput = ""
-				structuredCallID = ""
+			if structuredEnabled {
+				for id, activeName := range activeTools {
+					if activeName == "structured_output" {
+						structuredEligible[id] = false
+					}
+				}
+				if structuredOutput != "" {
+					structuredOutput = ""
+					structuredCallID = ""
+				}
 			}
 		}
 	}
