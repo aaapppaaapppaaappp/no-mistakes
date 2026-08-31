@@ -305,10 +305,7 @@ func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
 
 	exec := NewExecutor(database, p, &config.Config{Agent: types.AgentClaude}, nil, []Step{step}, nil)
 
-	done := make(chan error, 1)
-	go func() {
-		done <- exec.Execute(context.Background(), run, repo, workDir)
-	}()
+	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 
@@ -316,14 +313,7 @@ func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
 		t.Fatalf("respond error: %v", err)
 	}
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("expected no error, got: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("executor timed out")
-	}
+	waitExecutorDone(t, done)
 
 	approvalEvent := recorder.find("approval", "action", "fix")
 	if approvalEvent == nil {
