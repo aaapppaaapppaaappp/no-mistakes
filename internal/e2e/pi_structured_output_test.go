@@ -280,7 +280,7 @@ func TestAcpxPiStrictResponsesGateRepairsWithinOneAttempt(t *testing.T) {
 	}
 
 	piStarts := filepath.Join(dir, "pi-starts")
-	countingWrapper := filepath.Join(dir, "pi-gate-counting-wrapper")
+	countingWrapper := filepath.Join(dir, "pi-no-mistakes-flash-next-responses-acp")
 	dedicatedWrapper := filepath.Join(integrationPath, "bin", "pi-no-mistakes-flash-next-responses-acp")
 	wrapperScript := fmt.Sprintf("#!/bin/sh\nprintf x >> %q\nexec %q \"$@\"\n", piStarts, dedicatedWrapper)
 	if err := os.WriteFile(countingWrapper, []byte(wrapperScript), 0o700); err != nil {
@@ -288,7 +288,7 @@ func TestAcpxPiStrictResponsesGateRepairsWithinOneAttempt(t *testing.T) {
 	}
 
 	rawCommand := fmt.Sprintf(
-		"env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=%q %q",
+		"env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=%s %s",
 		countingWrapper, piACP,
 	)
 	a, err := agent.NewWithOptions(types.AgentName("acp:pi-flash-next-responses-gate"), acpx, nil, agent.Options{
@@ -331,6 +331,10 @@ func TestAcpxPiStrictResponsesGateRepairsWithinOneAttempt(t *testing.T) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf("decode provider request: %v\n%s", err, body)
+	}
+	repairNudge := "FORMAT_REPAIR_REQUIRED: No completed structured_output call was received. Do not repeat analysis. Do not output prose. Call structured_output exactly once with every required field."
+	if jsonValueContainsString(firstPayload["input"], repairNudge) || !jsonValueContainsString(payload["input"], repairNudge) {
+		t.Fatalf("fixed repair nudge was not delivered only on the continuation request: initial=%s repair=%s", firstBody, body)
 	}
 	firstSessionID, firstHasSessionID := firstPayload["prompt_cache_key"].(string)
 	repairSessionID, repairHasSessionID := payload["prompt_cache_key"].(string)
@@ -409,7 +413,7 @@ func TestAcpxPiStrictResponsesRouteDriftCannotReachProvider(t *testing.T) {
 	}
 
 	piStarts := filepath.Join(dir, "pi-starts")
-	countingWrapper := filepath.Join(dir, "pi-gate-counting-wrapper")
+	countingWrapper := filepath.Join(dir, "pi-no-mistakes-flash-next-responses-acp")
 	dedicatedWrapper := filepath.Join(integrationPath, "bin", "pi-no-mistakes-flash-next-responses-acp")
 	wrapperScript := fmt.Sprintf("#!/bin/sh\nprintf x >> %q\nexec %q \"$@\"\n", piStarts, dedicatedWrapper)
 	if err := os.WriteFile(countingWrapper, []byte(wrapperScript), 0o700); err != nil {
@@ -417,7 +421,7 @@ func TestAcpxPiStrictResponsesRouteDriftCannotReachProvider(t *testing.T) {
 	}
 
 	rawCommand := fmt.Sprintf(
-		"env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=%q %q",
+		"env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=%s %s",
 		countingWrapper, piACP,
 	)
 	a, err := agent.NewWithOptions(types.AgentName("acp:pi-flash-next-responses-gate"), realAcpx, nil, agent.Options{
@@ -454,6 +458,26 @@ func TestAcpxPiStrictResponsesRouteDriftCannotReachProvider(t *testing.T) {
 
 func agentcfgProfile(model string) agentcfg.Profile {
 	return agentcfg.Profile{Model: model}
+}
+
+func jsonValueContainsString(value any, want string) bool {
+	switch value := value.(type) {
+	case string:
+		return value == want
+	case []any:
+		for _, item := range value {
+			if jsonValueContainsString(item, want) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range value {
+			if jsonValueContainsString(item, want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestPiStructuredOutputExtensionLoadsInPiRPC(t *testing.T) {

@@ -19,6 +19,10 @@ const MAX_SCHEMA_BYTES = 1024 * 1024;
 const MAX_PROVIDER_REQUESTS = 3;
 const MAX_REPAIR_NUDGES = 2;
 const REPAIRABLE_RAW_STOP_REASON = "completed";
+const STRICT_TOOL_DESCRIPTION =
+  "Return the final no-mistakes result. Call this exactly once as the last action after completing the requested work.";
+const STRICT_TOOL_KEYS = new Set(["description", "name", "parameters", "strict", "type"]);
+const STRICT_OUTPUT_ITEM_TYPES = new Set(["function_call", "message", "reasoning"]);
 const STRICT_REQUEST_KEYS = new Set([
   "include", "include_reasoning", "input", "max_output_tokens", "model", "parallel_tool_calls",
   "prompt_cache_key", "prompt_cache_options", "prompt_cache_retention", "reasoning", "seed", "store", "stream", "temperature",
@@ -128,8 +132,7 @@ export default async function structuredOutputExtension(pi, options = {}) {
   pi.registerTool({
     name: "structured_output",
     label: "Structured Output",
-    description:
-      "Return the final no-mistakes result. Call this exactly once as the last action after completing the requested work.",
+    description: STRICT_TOOL_DESCRIPTION,
     promptSnippet: "Emit the final no-mistakes result with the invocation's required JSON schema",
     promptGuidelines: [
       "Use structured_output exactly once as the final action after completing the no-mistakes task; do not return the final result as prose.",
@@ -171,6 +174,7 @@ function createStrictRepairController(pi, schemaValidator) {
   let completed = false;
   let sessionIdentity;
   let turnDefect;
+  let turnRepairSent = false;
   let hardStop;
 
   const stop = (message) => {
@@ -194,6 +198,15 @@ function createStrictRepairController(pi, schemaValidator) {
   const providerFailure = (message) =>
     message?.stopReason === "error" || Boolean(message?.errorMessage) || Boolean(message?.error);
 
+  const sendRepair = (defect, deliverAs) => {
+    if (repairNudges >= MAX_REPAIR_NUDGES) {
+      stop("strict no-mistakes gate exhausted two same-session format repairs");
+    }
+    repairNudges++;
+    turnRepairSent = true;
+    pi.sendUserMessage(REPAIR_NUDGES[defect], { deliverAs });
+  };
+
   return {
     beginProviderRequest(payload) {
       if (hardStop) throw hardStop;
@@ -211,6 +224,7 @@ function createStrictRepairController(pi, schemaValidator) {
       }
       providerRequests++;
       turnDefect = undefined;
+      turnRepairSent = false;
     },
     reject(error) {
       hardStop ??= error instanceof Error ? error : new Error(String(error));
@@ -234,7 +248,10 @@ function createStrictRepairController(pi, schemaValidator) {
       if (call.name !== "structured_output") {
         stop("strict no-mistakes gate received a competing final tool call");
       }
-      if (!schemaValidator.Check(call.arguments)) turnDefect = "schema";
+      if (!schemaValidator.Check(call.arguments)) {
+        turnDefect = "schema";
+        sendRepair("schema", "steer");
+      }
     },
     accept(params) {
       if (hardStop) throw hardStop;
@@ -267,15 +284,9 @@ function createStrictRepairController(pi, schemaValidator) {
         stop("strict no-mistakes gate reached an invalid terminal transport boundary");
       }
       if (completed) return;
+      if (turnRepairSent) return;
       const defect = turnDefect ?? "missing";
-      if (repairNudges >= MAX_REPAIR_NUDGES) {
-        throw new Error("strict no-mistakes gate exhausted two same-session format repairs");
-      }
-      repairNudges++;
-      pi.sendUserMessage(REPAIR_NUDGES[defect], {
-        deliverAs: "followUp",
-        triggerTurn: true,
-      });
+      sendRepair(defect, "followUp");
     },
     state() {
       return { providerRequests, repairNudges, completed };
@@ -285,6 +296,8 @@ function createStrictRepairController(pi, schemaValidator) {
 
 function validateStrictResponsesSSE(text) {
   let terminal;
+  const addedItems = new Map();
+  const functionArguments = new Map();
   const settledItems = new Map();
   for (const line of text.split("\n")) {
     if (!line.startsWith("data:")) continue;
@@ -296,16 +309,42 @@ function validateStrictResponsesSSE(text) {
     } catch {
       throw new Error("strict no-mistakes gate received malformed Responses SSE JSON");
     }
+    if (terminal) {
+      throw new Error("strict no-mistakes gate received an event after the Responses terminal event");
+    }
     if (event.type === "response.failed" || event.type === "response.incomplete") {
       throw new Error("strict no-mistakes gate received a failed or incomplete Responses terminal event");
     }
-    if (event.type === "response.output_item.done") {
-      if (!Number.isInteger(event.output_index) || event.output_index < 0 ||
-          event.item === null || typeof event.item !== "object" || Array.isArray(event.item) ||
-          event.item.status !== "completed") {
-        throw new Error("strict no-mistakes gate received an unsettled Responses output item");
+    if (event.type === "response.output_item.added") {
+      validateOutputItemEvent(event, "in_progress");
+      if (event.output_index !== addedItems.size || addedItems.has(event.output_index)) {
+        throw new Error("strict no-mistakes gate received out-of-order Responses output items");
       }
-      if (settledItems.has(event.output_index)) {
+      addedItems.set(event.output_index, event.item);
+    }
+    if (event.type === "response.function_call_arguments.done") {
+      const added = addedItems.get(event.output_index);
+      if (added?.type !== "function_call" || added.id !== event.item_id ||
+          typeof event.arguments !== "string") {
+        throw new Error("strict no-mistakes gate received orphaned function arguments");
+      }
+      if (functionArguments.has(event.output_index)) {
+        throw new Error("strict no-mistakes gate received duplicate function arguments");
+      }
+      functionArguments.set(event.output_index, event.arguments);
+    }
+    if (event.type === "response.output_item.done") {
+      validateOutputItemEvent(event, "completed");
+      const added = addedItems.get(event.output_index);
+      if (!sameOutputItemIdentity(added, event.item)) {
+        throw new Error("strict no-mistakes gate received a mismatched Responses output item");
+      }
+      if (event.item.type === "function_call" &&
+          event.item.arguments !== functionArguments.get(event.output_index)) {
+        throw new Error("strict no-mistakes gate received inconsistent function arguments");
+      }
+      if (!Number.isInteger(event.output_index) || event.output_index < 0 ||
+          settledItems.has(event.output_index)) {
         throw new Error("strict no-mistakes gate received duplicate Responses output items");
       }
       settledItems.set(event.output_index, event.item);
@@ -318,7 +357,8 @@ function validateStrictResponsesSSE(text) {
   if (!terminal || terminal.status !== "completed" || terminal.error || terminal.incomplete_details) {
     throw new Error("strict no-mistakes gate received an invalid Responses terminal status");
   }
-  if (!Array.isArray(terminal.output) || terminal.output.length !== settledItems.size) {
+  if (!Array.isArray(terminal.output) || terminal.output.length !== addedItems.size ||
+      terminal.output.length !== settledItems.size) {
     throw new Error("strict no-mistakes gate received an inconsistent Responses terminal output");
   }
   for (let index = 0; index < terminal.output.length; index++) {
@@ -328,6 +368,26 @@ function validateStrictResponsesSSE(text) {
       throw new Error("strict no-mistakes gate received an inconsistent Responses terminal item");
     }
   }
+}
+
+function validateOutputItemEvent(event, status) {
+  const item = event.item;
+  if (!Number.isInteger(event.output_index) || event.output_index < 0 ||
+      item === null || typeof item !== "object" || Array.isArray(item) ||
+      !STRICT_OUTPUT_ITEM_TYPES.has(item.type) || typeof item.id !== "string" || item.id.length === 0 ||
+      item.status !== status) {
+    throw new Error("strict no-mistakes gate received an invalid Responses output item");
+  }
+  if (item.type === "function_call" &&
+      (item.name !== "structured_output" || typeof item.call_id !== "string" || item.call_id.length === 0)) {
+    throw new Error("strict no-mistakes gate received an unsupported Responses function item");
+  }
+}
+
+function sameOutputItemIdentity(added, done) {
+  if (!added || added.type !== done.type || added.id !== done.id) return false;
+  if (done.type !== "function_call") return true;
+  return added.call_id === done.call_id && added.name === done.name;
 }
 
 function installStrictResponsesTransportGuard(target) {
@@ -383,13 +443,19 @@ function enforceStrictResponsesRequest(payload, ctx, pi, schema) {
     throw new Error("strict no-mistakes gate requires exactly one serialized tool");
   }
   const tool = payload.tools[0];
-  if (tool?.type !== "function" || tool?.name !== "structured_output" || tool?.strict !== true ||
+  if (tool?.type !== "function" || tool?.name !== "structured_output" || tool?.description !== STRICT_TOOL_DESCRIPTION ||
+      tool?.strict !== true || Object.keys(tool).some((key) => !STRICT_TOOL_KEYS.has(key)) ||
       tool?.parameters === null || typeof tool?.parameters !== "object" ||
       !isDeepStrictEqual(tool.parameters, schema)) {
     throw new Error("strict no-mistakes gate requires a strict structured_output function");
   }
-  if (payload.reasoning?.effort !== "xhigh") {
+  if (!isDeepStrictEqual(payload.reasoning, { effort: "xhigh", summary: "auto" })) {
     throw new Error("strict no-mistakes gate payload lost xhigh reasoning");
+  }
+  if ((payload.tool_choice !== undefined && payload.tool_choice !== "required") ||
+      (payload.parallel_tool_calls !== undefined && payload.parallel_tool_calls !== false) ||
+      (payload.include_reasoning !== undefined && payload.include_reasoning !== false)) {
+    throw new Error("strict no-mistakes gate received conflicting request controls");
   }
   if (payload.temperature !== STRICT_TEMPERATURE || payload.top_p !== STRICT_TOP_P || payload.seed !== STRICT_SEED ||
       payload.max_output_tokens !== 4096 || payload.store !== false) {
@@ -420,6 +486,7 @@ export {
   STRICT_PROVIDER,
   STRICT_TEMPERATURE,
   STRICT_TOP_P,
+  STRICT_TOOL_DESCRIPTION,
   acceptedGateSchema,
   createStrictRepairController,
   enforceStrictResponsesRequest,

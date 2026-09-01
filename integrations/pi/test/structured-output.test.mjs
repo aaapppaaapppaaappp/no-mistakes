@@ -10,6 +10,7 @@ import extension, {
   REPAIR_NUDGES,
   STRICT_MODEL,
   STRICT_PROVIDER,
+  STRICT_TOOL_DESCRIPTION,
   createStrictRepairController,
   enforceStrictResponsesRequest,
   validateStrictResponsesSSE,
@@ -232,7 +233,10 @@ test("strict Responses request hook is exact and refuses other routes", () => {
     model: STRICT_MODEL,
     input: [{ role: "user", content: "review" }],
     stream: true,
-    tools: [{ type: "function", name: "structured_output", parameters: schema, strict: true }],
+    tools: [{
+      type: "function", name: "structured_output", description: STRICT_TOOL_DESCRIPTION,
+      parameters: schema, strict: true,
+    }],
     reasoning: { effort: "xhigh", summary: "auto" },
     include: ["reasoning.encrypted_content"],
     temperature: 1,
@@ -277,6 +281,24 @@ test("strict Responses request hook is exact and refuses other routes", () => {
     /strict structured_output/,
   );
   assert.throws(
+    () => enforceStrictResponsesRequest({ ...payload, tools: [{ ...payload.tools[0], description: "changed" }] }, ctx, pi, schema),
+    /strict structured_output/,
+  );
+  assert.throws(
+    () => enforceStrictResponsesRequest({ ...payload, reasoning: { effort: "xhigh", summary: "detailed" } }, ctx, pi, schema),
+    /xhigh reasoning/,
+  );
+  for (const controls of [
+    { tool_choice: "auto" },
+    { parallel_tool_calls: true },
+    { include_reasoning: true },
+  ]) {
+    assert.throws(
+      () => enforceStrictResponsesRequest({ ...payload, ...controls }, ctx, pi, schema),
+      /conflicting request controls/,
+    );
+  }
+  assert.throws(
     () => enforceStrictResponsesRequest({ ...payload, temperature: 0.2 }, ctx, pi, schema),
     /pinned request parameters/,
   );
@@ -298,32 +320,40 @@ test("strict Responses request hook is exact and refuses other routes", () => {
   );
 });
 
-test("Responses transport guard requires completed function-item status", () => {
+test("Responses transport guard requires one coherent supported item lifecycle", () => {
   const event = (type, value) => `event: ${type}\ndata: ${JSON.stringify(value)}\n\n`;
-  const valid = event("response.output_item.done", {
+  const addedItem = {
+    type: "function_call", id: "fc_1", call_id: "call_1", name: "structured_output",
+    arguments: "", status: "in_progress",
+  };
+  const doneItem = { ...addedItem, arguments: '{"summary":"ok"}', status: "completed" };
+  const added = event("response.output_item.added", {
+    type: "response.output_item.added", output_index: 0, item: addedItem,
+  });
+  const argumentsDone = event("response.function_call_arguments.done", {
+    type: "response.function_call_arguments.done", output_index: 0,
+    item_id: "fc_1", arguments: doneItem.arguments,
+  });
+  const done = event("response.output_item.done", {
     type: "response.output_item.done",
     output_index: 0,
-    item: { type: "function_call", name: "structured_output", status: "completed" },
-  }) + event("response.completed", {
+    item: doneItem,
+  });
+  const completed = event("response.completed", {
     type: "response.completed",
-    response: { status: "completed", error: null, incomplete_details: null, output: [
-      { type: "function_call", name: "structured_output", status: "completed" },
-    ] },
-  }) + "data: [DONE]\n\n";
+    response: { status: "completed", error: null, incomplete_details: null, output: [doneItem] },
+  });
+  const valid = added + argumentsDone + done + completed + "data: [DONE]\n\n";
   assert.doesNotThrow(() => validateStrictResponsesSSE(valid));
   assert.throws(
-    () => validateStrictResponsesSSE(valid.replace('"status":"completed"', '"status":"in_progress"')),
-    /unsettled Responses output item/,
+    () => validateStrictResponsesSSE(added + argumentsDone + completed.replace(
+      `"output":[${JSON.stringify(doneItem)}]`, '"output":[]',
+    )),
+    /inconsistent Responses terminal output/,
   );
   assert.throws(
-    () => validateStrictResponsesSSE(event("response.output_item.done", {
-      type: "response.output_item.done", output_index: 0,
-      item: { type: "function_call", name: "structured_output", status: "completed" },
-    }) + event("response.completed", {
-      type: "response.completed",
-      response: { status: "completed", error: null, incomplete_details: null, output: [] },
-    })),
-    /inconsistent Responses terminal output/,
+    () => validateStrictResponsesSSE(added + done + completed),
+    /inconsistent function arguments/,
   );
   assert.throws(
     () => validateStrictResponsesSSE(event("response.completed", {
@@ -333,16 +363,15 @@ test("Responses transport guard requires completed function-item status", () => 
     /inconsistent Responses terminal output/,
   );
   assert.throws(
-    () => validateStrictResponsesSSE(event("response.output_item.done", {
-      type: "response.output_item.done", output_index: 0,
-      item: { type: "reasoning", status: "in_progress" },
-    }) + event("response.completed", {
-      type: "response.completed",
-      response: { status: "completed", error: null, incomplete_details: null, output: [
-        { type: "reasoning", status: "in_progress" },
-      ] },
+    () => validateStrictResponsesSSE(event("response.output_item.added", {
+      type: "response.output_item.added", output_index: 0,
+      item: { type: "computer_call", id: "computer_1", status: "in_progress" },
     })),
-    /unsettled Responses output item/,
+    /invalid Responses output item/,
+  );
+  assert.throws(
+    () => validateStrictResponsesSSE(added + argumentsDone + done.replace("call_1", "call_2") + completed),
+    /mismatched Responses output item/,
   );
   assert.throws(
     () => validateStrictResponsesSSE(event("response.incomplete", { type: "response.incomplete" })),
@@ -361,7 +390,7 @@ test("same-session repair accepts native structured output after one fixed nudge
   repair.finishTurn({ message: { role: "assistant", stopReason: "stop", rawStopReason: "completed" } });
   assert.deepEqual(sent, [{
     text: REPAIR_NUDGES.missing,
-    options: { deliverAs: "followUp", triggerTurn: true },
+    options: { deliverAs: "followUp" },
   }]);
 
   repair.beginProviderRequest(sessionRequest);
@@ -377,7 +406,7 @@ test("same-session repair accepts native structured output after one fixed nudge
 test("repair classifies only objective format defects and caps provider turns", () => {
   const sent = [];
   const repair = createStrictRepairController(
-    { sendUserMessage: (text) => sent.push(text) },
+    { sendUserMessage: (text, options) => sent.push({ text, options }) },
     { Check: (value) => typeof value?.summary === "string" },
   );
 
@@ -385,8 +414,9 @@ test("repair classifies only objective format defects and caps provider turns", 
   repair.observeMessage({ role: "assistant", content: [{
     type: "toolCall", name: "structured_output", arguments: { summary: 17 },
   }], stopReason: "toolUse", rawStopReason: "completed" });
+  assert.deepEqual(sent[0], { text: REPAIR_NUDGES.schema, options: { deliverAs: "steer" } });
   repair.finishTurn({ message: { role: "assistant", stopReason: "toolUse", rawStopReason: "completed" } });
-  assert.equal(sent[0], REPAIR_NUDGES.schema);
+  assert.equal(sent.length, 1, "schema repair is not queued again at turn end");
 
   repair.beginProviderRequest(sessionRequest);
   assert.throws(
@@ -408,7 +438,7 @@ test("repair classifies only objective format defects and caps provider turns", 
   assert.equal(sent.length, 1);
 
   const bounded = createStrictRepairController(
-    { sendUserMessage: (text) => sent.push(text) },
+    { sendUserMessage: (text, options) => sent.push({ text, options }) },
     { Check: () => true },
   );
   bounded.beginProviderRequest(sessionRequest);
@@ -421,7 +451,7 @@ test("repair classifies only objective format defects and caps provider turns", 
     /exhausted two same-session format repairs/,
   );
   assert.deepEqual(bounded.state(), { providerRequests: 3, repairNudges: 2, completed: false });
-  assert.throws(() => bounded.beginProviderRequest(sessionRequest), /provider-request cap/);
+  assert.throws(() => bounded.beginProviderRequest(sessionRequest), /exhausted two same-session format repairs/);
 });
 
 test("repair pins one nonempty provider session identity", () => {
@@ -530,8 +560,11 @@ test("route drift aborts the Pi turn and blocks result authority", async () => {
       model: STRICT_MODEL,
       input: [{ role: "user", content: "review" }],
       stream: true,
-      tools: [{ type: "function", name: "structured_output", parameters: schema, strict: true }],
-      reasoning: { effort: "xhigh" },
+      tools: [{
+        type: "function", name: "structured_output", description: STRICT_TOOL_DESCRIPTION,
+        parameters: schema, strict: true,
+      }],
+      reasoning: { effort: "xhigh", summary: "auto" },
       temperature: 0.2,
       top_p: 0.95,
       seed: 424242,

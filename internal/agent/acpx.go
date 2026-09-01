@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,6 +31,8 @@ const (
 	acpxPICommandEnvVar        = "PI_ACP_PI_COMMAND"
 	acpxStrictResponsesTarget  = "pi-flash-next-responses-gate"
 	acpxStrictResponsesWrapper = "pi-no-mistakes-flash-next-responses-acp"
+	acpxStrictProofFileEnvVar  = "NO_MISTAKES_PI_STRICT_PROOF_FILE"
+	acpxStrictProofTokenEnvVar = "NO_MISTAKES_PI_STRICT_PROOF_TOKEN"
 )
 
 type acpxAgent struct {
@@ -53,6 +56,9 @@ func (a *acpxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if a.target == acpxStrictResponsesTarget && len(opts.JSONSchema) == 0 {
+		return nil, fmt.Errorf("%s requires a JSON schema", acpxStrictResponsesTarget)
+	}
 	return runWithRetry(ctx, a.Name(), opts, maxRetries, classifyTransient, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
 	})
@@ -68,6 +74,11 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		return nil, fmt.Errorf("acpx schema transport: %w", err)
 	}
 	defer cleanupSchema()
+	proofPath, proofToken, verifyProof, cleanupProof, err := createACPXStrictProof(a.target == acpxStrictResponsesTarget)
+	if err != nil {
+		return nil, fmt.Errorf("acpx strict wrapper proof: %w", err)
+	}
+	defer cleanupProof()
 
 	args := a.buildArgs(opts)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
@@ -89,6 +100,8 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		acpxSchemaDigestEnvVar+"="+schemaDigest,
 		acpxStructuredOutputEnvVar+"="+structuredOutputOptIn,
 		acpxSingleAttemptEnvVar+"=",
+		acpxStrictProofFileEnvVar+"="+proofPath,
+		acpxStrictProofTokenEnvVar+"="+proofToken,
 	)
 	shellenv.ConfigureShellCommand(cmd)
 
@@ -159,6 +172,12 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		warnProse()
 		emitAgentExited(opts, a.Name(), pid, stdinErr)
 		return nil, stdinErr
+	}
+	if err := verifyProof(); err != nil {
+		retErr := fmt.Errorf("acpx strict wrapper proof: %w", err)
+		warnProse()
+		emitAgentExited(opts, a.Name(), pid, retErr)
+		return nil, retErr
 	}
 	warnProse()
 	if usage.OutputTokens == 0 {
@@ -282,6 +301,47 @@ func acpxRawCommandEnvValue(rawCommand, name string) (string, bool) {
 }
 
 func (a *acpxAgent) Close() error { return nil }
+
+func createACPXStrictProof(enabled bool) (string, string, func() error, func(), error) {
+	if !enabled {
+		return "", "", func() error { return nil }, func() {}, nil
+	}
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", "", nil, nil, err
+	}
+	token := hex.EncodeToString(tokenBytes)
+	tempDir, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	f, err := os.CreateTemp(tempDir, "no-mistakes-pi-strict-proof-*.txt")
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	path := f.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", "", nil, nil, err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", "", nil, nil, err
+	}
+	verify := func() error {
+		proof, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if string(proof) != token+"\n" {
+			return errors.New("dedicated strict Pi wrapper did not provide its one-use proof")
+		}
+		return nil
+	}
+	return path, token, verify, cleanup, nil
+}
 
 func createACPXSchemaTransport(schema json.RawMessage) (string, func(), error) {
 	if len(schema) == 0 {

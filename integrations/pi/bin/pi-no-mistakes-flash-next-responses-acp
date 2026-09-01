@@ -8,6 +8,19 @@ if [ ! -x "$pi" ]; then
   exit 127
 fi
 
+proof_file=${NO_MISTAKES_PI_STRICT_PROOF_FILE:?strict wrapper proof file is required}
+proof_token=${NO_MISTAKES_PI_STRICT_PROOF_TOKEN:?strict wrapper proof token is required}
+case "$proof_file" in
+  /*) ;;
+  *) echo "strict wrapper proof file must be absolute" >&2; exit 2 ;;
+esac
+if [ ! -f "$proof_file" ] || [ -L "$proof_file" ]; then
+  echo "strict wrapper proof transport is invalid" >&2
+  exit 2
+fi
+printf '%s\n' "$proof_token" >> "$proof_file"
+unset NO_MISTAKES_PI_STRICT_PROOF_FILE NO_MISTAKES_PI_STRICT_PROOF_TOKEN
+
 source_agent_dir=${PI_CODING_AGENT_DIR:-"${HOME:?HOME is required}/.pi/agent"}
 gate_agent_dir=$(mktemp -d "${TMPDIR:-/tmp}/no-mistakes-pi-gate-XXXXXXXX")
 chmod 700 "$gate_agent_dir"
