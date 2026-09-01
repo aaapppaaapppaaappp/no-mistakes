@@ -214,7 +214,7 @@ func TestAcpxPiStrictResponsesGateRepairsWithinOneAttempt(t *testing.T) {
 			// The first provider turn settles without the required call. The Pi
 			// extension must inject one fixed repair nudge into this SAME session,
 			// not make acpx/no-mistakes start a fresh attempt.
-			output = nil
+			output = []any{}
 		}
 		response := map[string]any{
 			"id": "resp_fixture", "object": "response", "status": "completed",

@@ -118,8 +118,8 @@ func TestAcpxAgent_StrictToolResultStillRequiresFinalSchemaValidation(t *testing
 {"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":17}"}}]}}}`)
 	a := &acpxAgent{
 		bin:        writeStubAcpx(t, dir),
-		target:     "pi",
-		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 pi-acp",
+		target:     acpxStrictResponsesTarget,
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp",
 	}
 	_, err := a.Run(context.Background(), RunOpts{
 		Prompt:     "test",
@@ -139,8 +139,8 @@ func TestAcpxAgent_StructuredOutputProseEmitsBoundedWarning(t *testing.T) {
 {"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"authoritative\"}"}}]}}}`)
 	a := &acpxAgent{
 		bin:        writeStubAcpx(t, dir),
-		target:     "pi-flash-next-responses-gate",
-		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 pi-acp",
+		target:     acpxStrictResponsesTarget,
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp",
 	}
 	var warnings []LifecycleEvent
 	var chunks []string
@@ -172,8 +172,8 @@ func TestAcpxAgent_StructuredOutputProseWarningSurvivesProtocolFailure(t *testin
 	t.Setenv("NM_TEST_ACPX_EVENT", `{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"discarded prose"}}}`+"\nnot-json")
 	a := &acpxAgent{
 		bin:        writeStubAcpx(t, dir),
-		target:     "pi-flash-next-responses-gate",
-		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 pi-acp",
+		target:     acpxStrictResponsesTarget,
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp",
 	}
 	var warnings []LifecycleEvent
 	_, err := a.Run(context.Background(), RunOpts{
@@ -214,8 +214,8 @@ exit 1
 
 	a := &acpxAgent{
 		bin:        stub,
-		target:     "pi-flash-next-responses-gate",
-		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 pi-acp",
+		target:     acpxStrictResponsesTarget,
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp",
 	}
 	attempts := 0
 	_, err := a.Run(context.Background(), RunOpts{
@@ -258,12 +258,32 @@ func TestAcpxAgent_SingleAttemptControlRefusesInvalidOrUntrustedValues(t *testin
 		{name: "single quoted controls", raw: "env 'NO_MISTAKES_PI_STRUCTURED_OUTPUT=1' 'NO_MISTAKES_ACPX_ATTEMPTS=1' pi-acp"},
 		{name: "double quoted controls", raw: `env "NO_MISTAKES_PI_STRUCTURED_OUTPUT=1" "NO_MISTAKES_ACPX_ATTEMPTS=1" pi-acp`},
 		{name: "escaped controls", raw: `env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS\=1 pi-acp`},
+		{name: "env split string", raw: `env '-SNO_MISTAKES_PI_STRUCTURED_OUTPUT=1\_NO_MISTAKES_ACPX_ATTEMPTS=1' pi-acp`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &acpxAgent{bin: "must-not-start", target: "pi", rawCommand: tc.raw}
 			_, err := a.Run(context.Background(), RunOpts{})
 			if err == nil || (!strings.Contains(err.Error(), acpxSingleAttemptEnvVar) && !strings.Contains(err.Error(), acpxStructuredOutputEnvVar)) {
 				t.Fatalf("Run error = %v, want invalid control refusal", err)
+			}
+		})
+	}
+}
+
+func TestAcpxAgent_StrictResponsesTargetRequiresDedicatedRoute(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "missing controls", raw: "pi-acp"},
+		{name: "missing attempt control", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp"},
+		{name: "wrong wrapper", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-acp pi-acp"},
+		{name: "relative wrapper", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=pi-no-mistakes-flash-next-responses-acp pi-acp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &acpxAgent{bin: "must-not-start", target: acpxStrictResponsesTarget, rawCommand: tc.raw}
+			if _, err := a.Run(context.Background(), RunOpts{}); err == nil {
+				t.Fatal("Run succeeded, want strict route refusal")
 			}
 		})
 	}

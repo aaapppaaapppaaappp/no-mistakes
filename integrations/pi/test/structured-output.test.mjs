@@ -15,6 +15,8 @@ import extension, {
   validateStrictResponsesSSE,
 } from "../extensions/structured-output.mjs";
 
+const sessionRequest = Object.freeze({ prompt_cache_key: "pi-session-1" });
+
 async function withEnvironment(values, fn) {
   const previous = {};
   for (const [key, value] of Object.entries(values)) {
@@ -238,6 +240,7 @@ test("strict Responses request hook is exact and refuses other routes", () => {
     seed: 424242,
     max_output_tokens: 4096,
     store: false,
+    prompt_cache_key: "pi-session-1",
   };
   const pi = { getActiveTools: () => ["structured_output"] };
   const ctx = {
@@ -299,6 +302,7 @@ test("Responses transport guard requires completed function-item status", () => 
   const event = (type, value) => `event: ${type}\ndata: ${JSON.stringify(value)}\n\n`;
   const valid = event("response.output_item.done", {
     type: "response.output_item.done",
+    output_index: 0,
     item: { type: "function_call", name: "structured_output", status: "completed" },
   }) + event("response.completed", {
     type: "response.completed",
@@ -309,7 +313,36 @@ test("Responses transport guard requires completed function-item status", () => 
   assert.doesNotThrow(() => validateStrictResponsesSSE(valid));
   assert.throws(
     () => validateStrictResponsesSSE(valid.replace('"status":"completed"', '"status":"in_progress"')),
-    /unsettled Responses function item/,
+    /unsettled Responses output item/,
+  );
+  assert.throws(
+    () => validateStrictResponsesSSE(event("response.output_item.done", {
+      type: "response.output_item.done", output_index: 0,
+      item: { type: "function_call", name: "structured_output", status: "completed" },
+    }) + event("response.completed", {
+      type: "response.completed",
+      response: { status: "completed", error: null, incomplete_details: null, output: [] },
+    })),
+    /inconsistent Responses terminal output/,
+  );
+  assert.throws(
+    () => validateStrictResponsesSSE(event("response.completed", {
+      type: "response.completed",
+      response: { status: "completed", error: null, incomplete_details: null },
+    })),
+    /inconsistent Responses terminal output/,
+  );
+  assert.throws(
+    () => validateStrictResponsesSSE(event("response.output_item.done", {
+      type: "response.output_item.done", output_index: 0,
+      item: { type: "reasoning", status: "in_progress" },
+    }) + event("response.completed", {
+      type: "response.completed",
+      response: { status: "completed", error: null, incomplete_details: null, output: [
+        { type: "reasoning", status: "in_progress" },
+      ] },
+    })),
+    /unsettled Responses output item/,
   );
   assert.throws(
     () => validateStrictResponsesSSE(event("response.incomplete", { type: "response.incomplete" })),
@@ -323,7 +356,7 @@ test("same-session repair accepts native structured output after one fixed nudge
   const validator = { Check: (value) => typeof value?.summary === "string" };
   const repair = createStrictRepairController(pi, validator);
 
-  repair.beginProviderRequest();
+  repair.beginProviderRequest(sessionRequest);
   repair.observeMessage({ role: "assistant", content: [{ type: "text", text: "analysis prose" }], stopReason: "stop", rawStopReason: "completed" });
   repair.finishTurn({ message: { role: "assistant", stopReason: "stop", rawStopReason: "completed" } });
   assert.deepEqual(sent, [{
@@ -331,7 +364,7 @@ test("same-session repair accepts native structured output after one fixed nudge
     options: { deliverAs: "followUp", triggerTurn: true },
   }]);
 
-  repair.beginProviderRequest();
+  repair.beginProviderRequest(sessionRequest);
   repair.observeMessage({ role: "assistant", content: [{
     type: "toolCall", name: "structured_output", arguments: { summary: "native authority" },
   }], stopReason: "toolUse", rawStopReason: "completed" });
@@ -348,14 +381,14 @@ test("repair classifies only objective format defects and caps provider turns", 
     { Check: (value) => typeof value?.summary === "string" },
   );
 
-  repair.beginProviderRequest();
+  repair.beginProviderRequest(sessionRequest);
   repair.observeMessage({ role: "assistant", content: [{
     type: "toolCall", name: "structured_output", arguments: { summary: 17 },
   }], stopReason: "toolUse", rawStopReason: "completed" });
   repair.finishTurn({ message: { role: "assistant", stopReason: "toolUse", rawStopReason: "completed" } });
   assert.equal(sent[0], REPAIR_NUDGES.schema);
 
-  repair.beginProviderRequest();
+  repair.beginProviderRequest(sessionRequest);
   assert.throws(
     () => repair.observeMessage({ role: "assistant", content: [{
       type: "toolCall", name: "structured-ouput", arguments: { summary: "ok" },
@@ -378,17 +411,35 @@ test("repair classifies only objective format defects and caps provider turns", 
     { sendUserMessage: (text) => sent.push(text) },
     { Check: () => true },
   );
-  bounded.beginProviderRequest();
+  bounded.beginProviderRequest(sessionRequest);
   bounded.finishTurn({ message: { role: "assistant", stopReason: "stop", rawStopReason: "completed" } });
-  bounded.beginProviderRequest();
+  bounded.beginProviderRequest(sessionRequest);
   bounded.finishTurn({ message: { role: "assistant", stopReason: "stop", rawStopReason: "completed" } });
-  bounded.beginProviderRequest();
+  bounded.beginProviderRequest(sessionRequest);
   assert.throws(
     () => bounded.finishTurn({ message: { role: "assistant", stopReason: "stop", rawStopReason: "completed" } }),
     /exhausted two same-session format repairs/,
   );
   assert.deepEqual(bounded.state(), { providerRequests: 3, repairNudges: 2, completed: false });
-  assert.throws(() => bounded.beginProviderRequest(), /provider-request cap/);
+  assert.throws(() => bounded.beginProviderRequest(sessionRequest), /provider-request cap/);
+});
+
+test("repair pins one nonempty provider session identity", () => {
+  const repair = createStrictRepairController(
+    { sendUserMessage() {} },
+    { Check: () => true },
+  );
+  assert.throws(() => repair.beginProviderRequest({}), /requires a provider session identity/);
+
+  const changed = createStrictRepairController(
+    { sendUserMessage() {} },
+    { Check: () => true },
+  );
+  changed.beginProviderRequest({ prompt_cache_key: "session-a" });
+  assert.throws(
+    () => changed.beginProviderRequest({ prompt_cache_key: "session-b" }),
+    /session identity changed/,
+  );
 });
 
 test("repair hard-stops multiple calls and does not nudge provider failures", () => {
@@ -398,7 +449,7 @@ test("repair hard-stops multiple calls and does not nudge provider failures", ()
     { sendUserMessage: (text) => sent.push(text) },
     validator,
   );
-  repair.beginProviderRequest();
+  repair.beginProviderRequest(sessionRequest);
   assert.throws(() => repair.observeMessage({ role: "assistant", content: [
     { type: "toolCall", name: "structured_output", arguments: {} },
     { type: "toolCall", name: "structured_output", arguments: {} },
@@ -412,12 +463,12 @@ test("repair hard-stops multiple calls and does not nudge provider failures", ()
     { sendUserMessage: (text) => sent.push(text) },
     validator,
   );
-  duplicate.beginProviderRequest();
+  duplicate.beginProviderRequest(sessionRequest);
   duplicate.observeMessage({ role: "assistant", content: [{
     type: "toolCall", name: "structured_output", arguments: {},
   }], stopReason: "toolUse", rawStopReason: "completed" });
   duplicate.accept({});
-  duplicate.beginProviderRequest();
+  duplicate.beginProviderRequest(sessionRequest);
   duplicate.observeMessage({ role: "assistant", content: [{
     type: "toolCall", name: "structured_output", arguments: {},
   }], stopReason: "toolUse", rawStopReason: "completed" });
@@ -427,7 +478,7 @@ test("repair hard-stops multiple calls and does not nudge provider failures", ()
     { sendUserMessage: (text) => sent.push(text) },
     validator,
   );
-  failed.beginProviderRequest();
+  failed.beginProviderRequest(sessionRequest);
   failed.finishTurn({ message: { role: "assistant", stopReason: "error", errorMessage: "quota" } });
   assert.deepEqual(sent, []);
 });
@@ -439,7 +490,7 @@ test("invalid Responses terminal statuses never trigger format repair", () => {
       { sendUserMessage: (text) => sent.push(text) },
       { Check: () => true },
     );
-    repair.beginProviderRequest();
+    repair.beginProviderRequest(sessionRequest);
     const message = { role: "assistant", stopReason: "stop" };
     if (rawStopReason !== undefined) message.rawStopReason = rawStopReason;
     assert.throws(
@@ -484,6 +535,7 @@ test("route drift aborts the Pi turn and blocks result authority", async () => {
       temperature: 0.2,
       top_p: 0.95,
       seed: 424242,
+      prompt_cache_key: "pi-session-1",
     };
     const returned = handlers.get("before_provider_request")(
       { payload },

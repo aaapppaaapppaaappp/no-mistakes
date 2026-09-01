@@ -154,7 +154,7 @@ export default async function structuredOutputExtension(pi, options = {}) {
     pi.on("tool_call", (event) => strictRepair.guardToolCall(event));
     pi.on("before_provider_request", (event, ctx) => {
       try {
-        strictRepair.beginProviderRequest();
+        strictRepair.beginProviderRequest(event.payload);
         return enforceStrictResponsesRequest(event.payload, ctx, pi, schema);
       } catch (error) {
         strictRepair.reject(error);
@@ -169,6 +169,7 @@ function createStrictRepairController(pi, schemaValidator) {
   let providerRequests = 0;
   let repairNudges = 0;
   let completed = false;
+  let sessionIdentity;
   let turnDefect;
   let hardStop;
 
@@ -194,10 +195,19 @@ function createStrictRepairController(pi, schemaValidator) {
     message?.stopReason === "error" || Boolean(message?.errorMessage) || Boolean(message?.error);
 
   return {
-    beginProviderRequest() {
+    beginProviderRequest(payload) {
       if (hardStop) throw hardStop;
       if (providerRequests >= MAX_PROVIDER_REQUESTS) {
         stop("strict no-mistakes gate exhausted its provider-request cap");
+      }
+      const requestIdentity = payload?.prompt_cache_key;
+      if (typeof requestIdentity !== "string" || requestIdentity.length === 0) {
+        stop("strict no-mistakes gate requires a provider session identity");
+      }
+      if (sessionIdentity === undefined) {
+        sessionIdentity = requestIdentity;
+      } else if (requestIdentity !== sessionIdentity) {
+        stop("strict no-mistakes gate provider session identity changed");
       }
       providerRequests++;
       turnDefect = undefined;
@@ -275,6 +285,7 @@ function createStrictRepairController(pi, schemaValidator) {
 
 function validateStrictResponsesSSE(text) {
   let terminal;
+  const settledItems = new Map();
   for (const line of text.split("\n")) {
     if (!line.startsWith("data:")) continue;
     const data = line.slice(5).trim();
@@ -288,9 +299,16 @@ function validateStrictResponsesSSE(text) {
     if (event.type === "response.failed" || event.type === "response.incomplete") {
       throw new Error("strict no-mistakes gate received a failed or incomplete Responses terminal event");
     }
-    if (event.type === "response.output_item.done" && event.item?.type === "function_call" &&
-        event.item.status !== "completed") {
-      throw new Error("strict no-mistakes gate received an unsettled Responses function item");
+    if (event.type === "response.output_item.done") {
+      if (!Number.isInteger(event.output_index) || event.output_index < 0 ||
+          event.item === null || typeof event.item !== "object" || Array.isArray(event.item) ||
+          event.item.status !== "completed") {
+        throw new Error("strict no-mistakes gate received an unsettled Responses output item");
+      }
+      if (settledItems.has(event.output_index)) {
+        throw new Error("strict no-mistakes gate received duplicate Responses output items");
+      }
+      settledItems.set(event.output_index, event.item);
     }
     if (event.type === "response.completed") {
       if (terminal) throw new Error("strict no-mistakes gate received multiple Responses terminal events");
@@ -300,9 +318,14 @@ function validateStrictResponsesSSE(text) {
   if (!terminal || terminal.status !== "completed" || terminal.error || terminal.incomplete_details) {
     throw new Error("strict no-mistakes gate received an invalid Responses terminal status");
   }
-  for (const item of terminal.output ?? []) {
-    if (item?.type === "function_call" && item.status !== "completed") {
-      throw new Error("strict no-mistakes gate received an unsettled terminal function item");
+  if (!Array.isArray(terminal.output) || terminal.output.length !== settledItems.size) {
+    throw new Error("strict no-mistakes gate received an inconsistent Responses terminal output");
+  }
+  for (let index = 0; index < terminal.output.length; index++) {
+    const item = terminal.output[index];
+    if (item === null || typeof item !== "object" || Array.isArray(item) ||
+        item.status !== "completed" || !isDeepStrictEqual(item, settledItems.get(index))) {
+      throw new Error("strict no-mistakes gate received an inconsistent Responses terminal item");
     }
   }
 }

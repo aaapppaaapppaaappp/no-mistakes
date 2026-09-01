@@ -188,7 +188,7 @@ Select the explicit single-attempt ACP control for one trusted Pi exact-output t
 | Type    | exactly `1`; every other supplied value is refused               |
 | Default | unset (the existing no-mistakes retry behavior remains unchanged) |
 
-This is valid only as a standalone `env` assignment after `NO_MISTAKES_PI_STRUCTURED_OUTPUT=1` in trusted global `acp_registry_overrides`. It makes acpx's prompt retry count observably zero and disables no-mistakes' outer transient/parse retry for that invocation. The dedicated strict Responses wrapper independently disables Pi agent-level and provider retries, so there is exactly one process, ACP prompt, and persistent Pi session. Within that session only, the trusted extension may send at most two fixed format-repair nudges, bounding the invocation to three provider requests; these are continuation turns, not cold retries, and never quote model content. The invocation's process arguments, attempt records, and provider request count provide structured evidence of the control; it is not a generalized retry policy.
+This is valid only as a standalone `env` assignment after `NO_MISTAKES_PI_STRUCTURED_OUTPUT=1` on the dedicated trusted target in global `acp_registry_overrides`; it disables acpx and no-mistakes retries for that invocation. `integrations/pi/README.md` owns the strict route's full wrapper, session, repair, and request contract.
 
 ## `XDG_DATA_HOME`
 

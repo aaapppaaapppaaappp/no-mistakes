@@ -27,6 +27,9 @@ const (
 	acpxStructuredOutputEnvVar = "NO_MISTAKES_PI_STRUCTURED_OUTPUT"
 	acpxSingleAttemptEnvVar    = "NO_MISTAKES_ACPX_ATTEMPTS"
 	acpxSingleAttemptEnvValue  = "1"
+	acpxPICommandEnvVar        = "PI_ACP_PI_COMMAND"
+	acpxStrictResponsesTarget  = "pi-flash-next-responses-gate"
+	acpxStrictResponsesWrapper = "pi-no-mistakes-flash-next-responses-acp"
 )
 
 type acpxAgent struct {
@@ -46,7 +49,7 @@ func (a *acpxAgent) Name() string { return "acp:" + a.target }
 func (a *acpxAgent) ReportsAgentAttempts() bool { return true }
 
 func (a *acpxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
-	maxRetries, err := acpxMaxRetries(a.rawCommand)
+	maxRetries, err := acpxMaxRetries(a.target, a.rawCommand)
 	if err != nil {
 		return nil, err
 	}
@@ -171,20 +174,29 @@ func acpxStructuredOutputOptedIn(rawCommand string) bool {
 	return err == nil && assignments[acpxStructuredOutputEnvVar] == "1"
 }
 
-func acpxMaxRetries(rawCommand string) (int, error) {
+func acpxMaxRetries(target, rawCommand string) (int, error) {
 	assignments, err := acpxLeadingEnvAssignments(rawCommand)
 	if err != nil {
 		return 0, err
 	}
 	value, present := assignments[acpxSingleAttemptEnvVar]
-	if !present {
+	strictTarget := target == acpxStrictResponsesTarget
+	if !present && !strictTarget {
 		return claudeMaxRetries, nil
 	}
-	if !acpxStructuredOutputOptedIn(rawCommand) {
+	if !strictTarget {
+		return 0, fmt.Errorf("%s is valid only on %s", acpxSingleAttemptEnvVar, acpxStrictResponsesTarget)
+	}
+	if assignments[acpxStructuredOutputEnvVar] != "1" {
 		return 0, fmt.Errorf("%s is valid only on a trusted ACP Pi structured-output target", acpxSingleAttemptEnvVar)
 	}
-	if value != acpxSingleAttemptEnvValue {
+	if !present || value != acpxSingleAttemptEnvValue {
 		return 0, fmt.Errorf("invalid %s=%q: the only supported value is %s", acpxSingleAttemptEnvVar, value, acpxSingleAttemptEnvValue)
+	}
+	piCommand := assignments[acpxPICommandEnvVar]
+	if !filepath.IsAbs(piCommand) || filepath.Base(piCommand) != acpxStrictResponsesWrapper ||
+		strings.ContainsAny(piCommand, `\'"$`+"`") {
+		return 0, fmt.Errorf("%s requires the dedicated %s wrapper", acpxStrictResponsesTarget, acpxStrictResponsesWrapper)
 	}
 	return 0, nil
 }
@@ -249,8 +261,12 @@ func acpxPotentialControlledEnvName(token string) (string, bool) {
 	// quoted or escaped spelling that strings.Fields cannot interpret exactly,
 	// rather than letting the child activate a control the parent did not see.
 	normalized := strings.NewReplacer("'", "", `"`, "", "\\", "").Replace(token)
-	name, _, ok := strings.Cut(normalized, "=")
-	return name, ok && acpxControlledEnvName(name)
+	for _, name := range []string{acpxStructuredOutputEnvVar, acpxSingleAttemptEnvVar} {
+		if strings.Contains(normalized, name+"=") {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // acpxRawCommandEnvValue recognizes only a leading env assignment. The raw
@@ -507,11 +523,15 @@ func parseAcpxJSONEventsWithEvidence(ctx context.Context, r io.Reader, onChunk f
 			continue
 		}
 		markAcpxUsagePresence(line, &msg)
-		if msg.Error != nil && msg.Error.Message != "" {
-			if stdoutErr == "" {
+		if msg.Error != nil {
+			if stdoutErr == "" && msg.Error.Message != "" {
 				stdoutErr = msg.Error.Message
 			}
-			failProtocol("ACP JSON-RPC error: " + msg.Error.Message)
+			reason := "ACP JSON-RPC error"
+			if msg.Error.Message != "" {
+				reason += ": " + msg.Error.Message
+			}
+			failProtocol(reason)
 		}
 		*usage = acpxMaxUsage(*usage, acpxUsageFieldsToTokenUsage(msg.Result.Usage))
 		if msg.Method != "session/update" {

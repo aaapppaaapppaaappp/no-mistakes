@@ -249,8 +249,6 @@ The wrapper disables discovered Pi extensions and explicitly loads only the no-m
 
 The detailed strict Responses route, inactive Flash-Next fixture, session/retry bounds, and hard-stop contract are owned by `integrations/pi/README.md`.
 
-The fixture's credential-neutral loopback URL is not a health assertion and must not be used to revive or trust a stale tunnel. Before a disposable canary, independently pin the live service identity and substitute only a healthy authorized route in disposable owner-only configuration. Passing the bounded matrix does not activate this target: do not install it into machine-global production, alter an existing Sol/Luna/Chat profile, or select it without separate operator authority.
-
 ### agent_path_override
 
 Custom binary paths for native agents launched directly by no-mistakes.

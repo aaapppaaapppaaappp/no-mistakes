@@ -862,6 +862,20 @@ func TestParseAcpxJSONEvents_StrictRejectsJSONRPCErrorAfterValidTool(t *testing.
 	assertACPXProtocolError(t, out, err, "ACP JSON-RPC error")
 }
 
+func TestParseAcpxJSONEvents_StrictRejectsEmptyJSONRPCErrorAfterValidTool(t *testing.T) {
+	events := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"ok\"}"}}]}}}`,
+		`{"error":{"code":-32000,"message":""}}`,
+	}, "\n")
+	var usage TokenUsage
+	out, stdoutErr, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, true)
+	if stdoutErr != "" {
+		t.Fatalf("stdoutErr = %q, want no fabricated message", stdoutErr)
+	}
+	assertACPXProtocolError(t, out, err, "ACP JSON-RPC error")
+}
+
 func TestParseAcpxJSONEvents_StrictRejectsFailedCallAfterAuthority(t *testing.T) {
 	events := strings.Join([]string{
 		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"first","title":"structured_output","status":"in_progress"}}}`,
