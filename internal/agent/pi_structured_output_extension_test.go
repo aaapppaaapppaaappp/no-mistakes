@@ -4,9 +4,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +22,57 @@ func piStructuredOutputIntegrationPath(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestPiStrictResponsesFixturesPinTheNarrowRoute(t *testing.T) {
+	integrationPath := piStructuredOutputIntegrationPath(t)
+	modelsBytes, err := os.ReadFile(filepath.Join(integrationPath, "fixtures", "flash-next-responses-models.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var models struct {
+		Providers map[string]struct {
+			API    string `json:"api"`
+			Models []struct {
+				ID               string         `json:"id"`
+				Reasoning        bool           `json:"reasoning"`
+				ThinkingLevelMap map[string]any `json:"thinkingLevelMap"`
+				SamplingParams   map[string]any `json:"samplingParams"`
+				Compat           map[string]any `json:"compat"`
+			} `json:"models"`
+			Compat map[string]any `json:"compat"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(modelsBytes, &models); err != nil {
+		t.Fatal(err)
+	}
+	provider, ok := models.Providers["no-mistakes-flash-next-responses"]
+	if !ok || len(models.Providers) != 1 || provider.API != "openai-responses" || len(provider.Models) != 1 {
+		t.Fatalf("fixture provider shape = %+v", models.Providers)
+	}
+	model := provider.Models[0]
+	if model.ID != "Qwen/Qwen3.8-Flash-Next-FP8" || !model.Reasoning ||
+		model.ThinkingLevelMap["xhigh"] != "xhigh" || provider.Compat["supportsStrictMode"] != true ||
+		model.SamplingParams["temperature"] != float64(1) || model.SamplingParams["top_p"] != 0.95 ||
+		model.SamplingParams["seed"] != float64(424242) {
+		t.Fatalf("fixture model contract = %+v provider compat=%+v", model, provider.Compat)
+	}
+
+	routeBytes, err := os.ReadFile(filepath.Join(integrationPath, "fixtures", "flash-next-responses-route.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := string(routeBytes)
+	for _, exact := range []string{
+		"agent: acp:pi-flash-next-responses-gate",
+		"model: no-mistakes-flash-next-responses/Qwen/Qwen3.8-Flash-Next-FP8",
+		"NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1",
+		"pi-no-mistakes-flash-next-responses-acp",
+	} {
+		if !strings.Contains(route, exact) {
+			t.Fatalf("route fixture missing %q: %s", exact, route)
+		}
+	}
 }
 
 func TestPiStructuredOutputExtensionContract(t *testing.T) {

@@ -5,7 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import extension, { MAX_SCHEMA_BYTES } from "../extensions/structured-output.mjs";
+import extension, {
+  MAX_PROVIDER_REQUESTS,
+  MAX_REPAIR_NUDGES,
+  MAX_SCHEMA_BYTES,
+  REPAIR_NUDGES,
+  STRICT_MODEL,
+  STRICT_PROVIDER,
+  createStrictRepairController,
+  enforceStrictResponsesRequest,
+} from "../extensions/structured-output.mjs";
 
 async function withEnvironment(values, fn) {
   const previous = {};
@@ -178,6 +187,174 @@ test("review and test schemas are registered exactly without interpretation", as
 
   assert.deepEqual((await load(review))[0].parameters, review);
   assert.deepEqual((await load(testSchema))[0].parameters, testSchema);
+});
+
+test("strict Responses activation marks the sole tool for required constrained sampling", async () => {
+  const file = schemaFile({
+    type: "object",
+    properties: { summary: { type: "string" } },
+    required: ["summary"],
+    additionalProperties: false,
+  });
+  const tools = [];
+  const handlers = new Map();
+  const env = {
+    NO_MISTAKES_GATE: "1",
+    NO_MISTAKES_PI_STRUCTURED_OUTPUT: "1",
+    NO_MISTAKES_PI_STRICT_RESPONSES: "1",
+    NO_MISTAKES_JSON_SCHEMA_FILE: file.path,
+    NO_MISTAKES_JSON_SCHEMA_SHA256: file.digest,
+  };
+  try {
+    await extension({
+      registerTool: (tool) => tools.push(tool),
+      on: (name, handler) => handlers.set(name, handler),
+      getActiveTools: () => ["structured_output"],
+    }, { env });
+    assert.equal(tools.length, 1);
+    assert.deepEqual(tools[0].constrainedSampling, { type: "json_schema", strict: "require" });
+    assert.equal(typeof handlers.get("before_provider_request"), "function");
+    assert.equal(env.NO_MISTAKES_PI_STRICT_RESPONSES, undefined);
+  } finally {
+    file.cleanup();
+  }
+});
+
+test("strict Responses request hook is exact and refuses other routes", () => {
+  const schema = {
+    type: "object",
+    properties: { summary: { type: "string" } },
+    required: ["summary"],
+    additionalProperties: false,
+  };
+  const payload = {
+    model: STRICT_MODEL,
+    input: [{ role: "user", content: "review" }],
+    stream: true,
+    tools: [{ type: "function", name: "structured_output", parameters: schema, strict: true }],
+    reasoning: { effort: "xhigh", summary: "auto" },
+    include: ["reasoning.encrypted_content"],
+    temperature: 1,
+    top_p: 0.95,
+    seed: 424242,
+  };
+  const pi = { getActiveTools: () => ["structured_output"] };
+  const ctx = {
+    model: { provider: STRICT_PROVIDER, id: STRICT_MODEL, api: "openai-responses" },
+    thinkingLevel: "xhigh",
+  };
+  const result = enforceStrictResponsesRequest(payload, ctx, pi);
+  assert.equal(result.tool_choice, "required");
+  assert.equal(result.parallel_tool_calls, false);
+  assert.equal(result.include_reasoning, false);
+  assert.equal(result.include, undefined);
+  assert.equal(result.tools[0].strict, true);
+  assert.deepEqual(result.tools[0].parameters, schema);
+  assert.equal(result.reasoning.effort, "xhigh");
+  assert.equal(result.model, STRICT_MODEL);
+  assert.equal(result.temperature, 1);
+  assert.equal(result.top_p, 0.95);
+  assert.equal(result.seed, 424242);
+
+  assert.throws(
+    () => enforceStrictResponsesRequest(payload, { ...ctx, model: { ...ctx.model, api: "openai-completions" } }, pi),
+    /openai-responses/,
+  );
+  assert.throws(
+    () => enforceStrictResponsesRequest(payload, ctx, { getActiveTools: () => ["read", "structured_output"] }),
+    /only active tool/,
+  );
+  assert.throws(
+    () => enforceStrictResponsesRequest({ ...payload, tools: [{ ...payload.tools[0], strict: false }] }, ctx, pi),
+    /strict structured_output/,
+  );
+});
+
+test("same-session repair accepts native structured output after one fixed nudge", () => {
+  const sent = [];
+  const pi = { sendUserMessage: (text, options) => sent.push({ text, options }) };
+  const validator = { Check: (value) => typeof value?.summary === "string" };
+  const repair = createStrictRepairController(pi, validator);
+
+  repair.beginProviderRequest();
+  repair.observeMessage({ role: "assistant", content: [{ type: "text", text: "analysis prose" }] });
+  repair.finishTurn({ message: { role: "assistant", stopReason: "stop" } });
+  assert.deepEqual(sent, [{
+    text: REPAIR_NUDGES.missing,
+    options: { deliverAs: "followUp", triggerTurn: true },
+  }]);
+
+  repair.beginProviderRequest();
+  repair.observeMessage({ role: "assistant", content: [{
+    type: "toolCall", name: "structured_output", arguments: { summary: "native authority" },
+  }] });
+  repair.accept({ summary: "native authority" });
+  repair.finishTurn({ message: { role: "assistant", stopReason: "toolUse" } });
+  assert.deepEqual(repair.state(), { providerRequests: 2, repairNudges: 1, completed: true });
+  assert.equal(sent.length, 1, "repair stays inside one controller/session and does not cold-retry");
+});
+
+test("repair classifies only objective format defects and caps provider turns", () => {
+  const sent = [];
+  const repair = createStrictRepairController(
+    { sendUserMessage: (text) => sent.push(text) },
+    { Check: (value) => typeof value?.summary === "string" },
+  );
+
+  repair.beginProviderRequest();
+  repair.observeMessage({ role: "assistant", content: [{
+    type: "toolCall", name: "structured_output", arguments: { summary: 17 },
+  }] });
+  repair.finishTurn({ message: { role: "assistant", stopReason: "toolUse" } });
+  assert.equal(sent[0], REPAIR_NUDGES.schema);
+
+  repair.beginProviderRequest();
+  repair.observeMessage({ role: "assistant", content: [{
+    type: "toolCall", name: "structured-ouput", arguments: { summary: "ok" },
+  }] });
+  repair.finishTurn({ message: { role: "assistant", stopReason: "toolUse" } });
+  assert.equal(sent[1], REPAIR_NUDGES.name);
+
+  repair.beginProviderRequest();
+  assert.throws(
+    () => repair.finishTurn({ message: { role: "assistant", stopReason: "stop" } }),
+    /exhausted two same-session format repairs/,
+  );
+  assert.deepEqual(repair.state(), {
+    providerRequests: MAX_PROVIDER_REQUESTS,
+    repairNudges: MAX_REPAIR_NUDGES,
+    completed: false,
+  });
+  assert.throws(() => repair.beginProviderRequest(), /provider-request cap/);
+});
+
+test("repair hard-stops multiple calls and does not nudge provider failures", () => {
+  const sent = [];
+  const validator = { Check: () => true };
+  const repair = createStrictRepairController(
+    { sendUserMessage: (text) => sent.push(text) },
+    validator,
+  );
+  repair.beginProviderRequest();
+  assert.throws(() => repair.observeMessage({ role: "assistant", content: [
+    { type: "toolCall", name: "structured_output", arguments: {} },
+    { type: "toolCall", name: "structured_output", arguments: {} },
+  ] }), /multiple final tool calls/);
+
+  const failed = createStrictRepairController(
+    { sendUserMessage: (text) => sent.push(text) },
+    validator,
+  );
+  failed.beginProviderRequest();
+  failed.finishTurn({ message: { role: "assistant", stopReason: "error", errorMessage: "quota" } });
+  assert.deepEqual(sent, []);
+});
+
+test("malformed strict route control is refused", async () => {
+  await assert.rejects(
+    load({ type: "object" }, { NO_MISTAKES_PI_STRICT_RESPONSES: "true" }),
+    /accepts only 1/,
+  );
 });
 
 test("structured_output returns only exact JSON text and terminates", async () => {

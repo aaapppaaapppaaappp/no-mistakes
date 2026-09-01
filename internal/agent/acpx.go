@@ -25,6 +25,8 @@ const (
 	acpxSchemaEnvVar           = "NO_MISTAKES_JSON_SCHEMA_FILE"
 	acpxSchemaDigestEnvVar     = "NO_MISTAKES_JSON_SCHEMA_SHA256"
 	acpxStructuredOutputEnvVar = "NO_MISTAKES_PI_STRUCTURED_OUTPUT"
+	acpxSingleAttemptEnvVar    = "NO_MISTAKES_ACPX_ATTEMPTS"
+	acpxSingleAttemptEnvValue  = "1"
 )
 
 type acpxAgent struct {
@@ -44,7 +46,11 @@ func (a *acpxAgent) Name() string { return "acp:" + a.target }
 func (a *acpxAgent) ReportsAgentAttempts() bool { return true }
 
 func (a *acpxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
-	return runWithRetry(ctx, a.Name(), opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
+	maxRetries, err := acpxMaxRetries(a.rawCommand)
+	if err != nil {
+		return nil, err
+	}
+	return runWithRetry(ctx, a.Name(), opts, maxRetries, classifyTransient, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
 	})
 }
@@ -79,6 +85,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		acpxSchemaEnvVar+"="+schemaPath,
 		acpxSchemaDigestEnvVar+"="+schemaDigest,
 		acpxStructuredOutputEnvVar+"="+structuredOutputOptIn,
+		acpxSingleAttemptEnvVar+"=",
 	)
 	shellenv.ConfigureShellCommand(cmd)
 
@@ -106,7 +113,17 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	}()
 
 	var usage TokenUsage
-	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage, len(opts.JSONSchema) > 0 && structuredOutputEnabled)
+	_, singleAttempt := acpxRawCommandEnvValue(a.rawCommand, acpxSingleAttemptEnvVar)
+	var protocolEvidence acpxProtocolEvidence
+	text, stdoutErr, err := parseAcpxJSONEventsWithEvidence(
+		ctx,
+		started.stdout,
+		opts.OnChunk,
+		&usage,
+		&protocolEvidence,
+		len(opts.JSONSchema) > 0 && structuredOutputEnabled,
+		singleAttempt,
+	)
 	if err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
@@ -130,6 +147,9 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		emitAgentExited(opts, a.Name(), pid, stdinErr)
 		return nil, stdinErr
 	}
+	if protocolEvidence.assistantProse {
+		emitAgentWarning(opts, a.Name(), "warning: ACP exact-output turn emitted assistant prose; ignored in favor of the native structured_output arguments")
+	}
 	if usage.OutputTokens == 0 {
 		usage.OutputTokens = estimateAcpxTokens(len(text))
 	}
@@ -140,6 +160,33 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 
 func acpxStructuredOutputOptedIn(rawCommand string) bool {
 	return strings.HasPrefix(strings.TrimSpace(rawCommand), "env "+acpxStructuredOutputEnvVar+"=1 ")
+}
+
+func acpxMaxRetries(rawCommand string) (int, error) {
+	value, present := acpxRawCommandEnvValue(rawCommand, acpxSingleAttemptEnvVar)
+	if !present {
+		return claudeMaxRetries, nil
+	}
+	if !acpxStructuredOutputOptedIn(rawCommand) {
+		return 0, fmt.Errorf("%s is valid only on a trusted ACP Pi structured-output target", acpxSingleAttemptEnvVar)
+	}
+	if value != acpxSingleAttemptEnvValue {
+		return 0, fmt.Errorf("invalid %s=%q: the only supported value is %s", acpxSingleAttemptEnvVar, value, acpxSingleAttemptEnvValue)
+	}
+	return 0, nil
+}
+
+// acpxRawCommandEnvValue recognizes only a standalone env assignment. The raw
+// command is trusted global configuration, but deliberately is not parsed as a
+// shell language here: quoting or expansion cannot silently activate a gate.
+func acpxRawCommandEnvValue(rawCommand, name string) (string, bool) {
+	prefix := name + "="
+	for _, field := range strings.Fields(strings.TrimSpace(rawCommand)) {
+		if strings.HasPrefix(field, prefix) {
+			return strings.TrimPrefix(field, prefix), true
+		}
+	}
+	return "", false
 }
 
 func (a *acpxAgent) Close() error { return nil }
@@ -222,6 +269,11 @@ func (a *acpxAgent) buildArgs(opts RunOpts) []string {
 	// the exec subcommand, or acpx reads it as an argument to the target.
 	if a.model != "" {
 		args = append(args, "--model", a.model)
+	}
+	if _, present := acpxRawCommandEnvValue(a.rawCommand, acpxSingleAttemptEnvVar); present {
+		// acpx currently defaults to zero prompt retries. Make that part of the
+		// observable process contract instead of relying on a version default.
+		args = append(args, "--prompt-retries", "0")
 	}
 	if a.rawCommand == "" {
 		args = append(args, a.target)
@@ -309,17 +361,54 @@ type acpxUsageFields struct {
 	cacheCreationReported         bool
 }
 
+// ACPStructuredOutputProtocolError means an opted-in exact-output turn did
+// not end in one exclusive, completed structured_output call. Callers may use
+// errors.As to distinguish a provider/protocol violation from process failure.
+type ACPStructuredOutputProtocolError struct {
+	Reason string
+}
+
+func (e *ACPStructuredOutputProtocolError) Error() string {
+	return "ACP structured-output protocol violation: " + e.Reason
+}
+
+func acpxProtocolError(reason string) error {
+	return &ACPStructuredOutputProtocolError{Reason: reason}
+}
+
+type acpxProtocolEvidence struct {
+	assistantProse bool
+}
+
 func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, acceptStructuredOutput ...bool) (string, string, error) {
+	return parseAcpxJSONEventsWithEvidence(ctx, r, onChunk, usage, nil, acceptStructuredOutput...)
+}
+
+func parseAcpxJSONEventsWithEvidence(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, evidence *acpxProtocolEvidence, acceptStructuredOutput ...bool) (string, string, error) {
+	structuredEnabled := len(acceptStructuredOutput) > 0 && acceptStructuredOutput[0]
+	strictProtocol := structuredEnabled
+	if len(acceptStructuredOutput) > 1 {
+		strictProtocol = acceptStructuredOutput[1]
+	}
+	if structuredEnabled && !strictProtocol {
+		return parseAcpxLegacyStructuredJSONEvents(ctx, r, onChunk, usage)
+	}
+
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), acpxScannerMaxTokenSize)
 	var output strings.Builder
 	var stdoutErr string
-	structuredEnabled := len(acceptStructuredOutput) > 0 && acceptStructuredOutput[0]
-	toolNames := make(map[string]string)
-	activeTools := make(map[string]string)
-	structuredEligible := make(map[string]bool)
 	var structuredOutput string
 	var structuredCallID string
+	var structuredCalls int
+	var protocolReason string
+	activeTools := make(map[string]string)
+
+	failProtocol := func(reason string) {
+		if structuredEnabled && protocolReason == "" {
+			protocolReason = reason
+		}
+	}
 
 	for scanner.Scan() {
 		select {
@@ -335,6 +424,9 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 
 		var msg acpxJSONMessage
 		if err := json.Unmarshal(line, &msg); err != nil {
+			if structuredEnabled {
+				return "", stdoutErr, acpxProtocolError("malformed acpx JSON event")
+			}
 			continue
 		}
 		markAcpxUsagePresence(line, &msg)
@@ -355,6 +447,163 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			if text == "" {
 				continue
 			}
+			// pi-acp emits this fixed adapter banner as an ACP assistant chunk
+			// before the model turn. It is not provider/model prose.
+			if structuredEnabled && structuredCalls == 0 && text == "pi v0.84.4\n---\n" {
+				continue
+			}
+			if structuredEnabled {
+				// Native structured_output arguments are the sole authority. Keep
+				// prose out of both result construction and streaming output; retain
+				// only a bounded presence bit for the lifecycle warning.
+				if evidence != nil {
+					evidence.assistantProse = true
+				}
+				continue
+			}
+			output.WriteString(text)
+			if onChunk != nil {
+				onChunk(text)
+			}
+		case "tool_call":
+			if !structuredEnabled {
+				continue
+			}
+			if update.ToolCallID == "" {
+				failProtocol("tool call is missing an id")
+				continue
+			}
+			name := acpxStructuredToolName(update)
+			if name == "" {
+				failProtocol("tool call is missing a name")
+			}
+			if _, duplicateID := activeTools[update.ToolCallID]; duplicateID {
+				failProtocol("duplicate tool call id was emitted")
+			}
+			if len(activeTools) != 0 {
+				failProtocol("coissued tool calls were emitted")
+			}
+			activeTools[update.ToolCallID] = name
+		case "tool_call_update":
+			if !structuredEnabled {
+				continue
+			}
+			if update.ToolCallID == "" {
+				failProtocol("tool update is missing an id")
+				continue
+			}
+			name, known := activeTools[update.ToolCallID]
+			if !known {
+				failProtocol("tool update has no preceding tool call")
+				continue
+			}
+			if updateName := acpxStructuredToolName(update); updateName != "" && updateName != name {
+				failProtocol("tool name changed during the call")
+			}
+			switch update.Status {
+			case "failed":
+				// The strict Pi extension may repair a schema/field/tool-name
+				// formatting failure in the same session. A failed final-tool
+				// attempt has no authoritative result and no side effects.
+				delete(activeTools, update.ToolCallID)
+			case "completed":
+				delete(activeTools, update.ToolCallID)
+				if name != "structured_output" {
+					failProtocol("competing tool completed")
+					continue
+				}
+				structuredCalls++
+				if structuredCalls != 1 || structuredOutput != "" {
+					failProtocol("structured_output completed more than once")
+					continue
+				}
+				text, ok := acpxCompletedToolText(update)
+				if !ok {
+					failProtocol("completed structured_output has no exact text result")
+					continue
+				}
+				structuredOutput = text
+				structuredCallID = update.ToolCallID
+			case "", "in_progress", "pending":
+				// Non-terminal progress is expected.
+			default:
+				failProtocol("tool call has invalid terminal status " + update.Status)
+			}
+		case "agent_thought_chunk":
+			if structuredEnabled && (len(activeTools) > 0 || structuredCalls > 0) && acpxUpdateText(update) != "" {
+				failProtocol("thought activity occurred during or after a final tool call")
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", stdoutErr, err
+	}
+	if !structuredEnabled {
+		return output.String(), stdoutErr, nil
+	}
+	if protocolReason != "" {
+		return "", stdoutErr, acpxProtocolError(protocolReason)
+	}
+	if len(activeTools) != 0 {
+		return "", stdoutErr, acpxProtocolError("tool call remained incomplete at end of stream")
+	}
+	if structuredCalls == 0 {
+		return "", stdoutErr, acpxProtocolError("no structured_output call completed")
+	}
+	if structuredCalls != 1 {
+		return "", stdoutErr, acpxProtocolError("multiple structured_output calls were emitted")
+	}
+	if structuredOutput == "" || structuredCallID == "" {
+		return "", stdoutErr, acpxProtocolError("structured_output call did not complete with a result")
+	}
+	return structuredOutput, stdoutErr, nil
+}
+
+// parseAcpxLegacyStructuredJSONEvents preserves the pre-existing ACP extractor
+// for targets that did not explicitly select the one-attempt strict protocol.
+// Those targets keep their established Pi parse/schema retry behavior.
+func parseAcpxLegacyStructuredJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage) (string, string, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), acpxScannerMaxTokenSize)
+	var output strings.Builder
+	var stdoutErr string
+	toolNames := make(map[string]string)
+	activeTools := make(map[string]string)
+	structuredEligible := make(map[string]bool)
+	var structuredOutput string
+	var structuredCallID string
+
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return "", stdoutErr, ctx.Err()
+		default:
+		}
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var msg acpxJSONMessage
+		if err := json.Unmarshal(line, &msg); err != nil {
+			continue
+		}
+		markAcpxUsagePresence(line, &msg)
+		if msg.Error != nil && msg.Error.Message != "" && stdoutErr == "" {
+			stdoutErr = msg.Error.Message
+		}
+		*usage = acpxMaxUsage(*usage, acpxUsageFieldsToTokenUsage(msg.Result.Usage))
+		if msg.Method != "session/update" {
+			continue
+		}
+		update := msg.Params.Update
+		switch update.SessionUpdate {
+		case "usage_update":
+			*usage = acpxMaxUsage(*usage, acpxUpdateUsage(update))
+		case "agent_message_chunk":
+			text := acpxUpdateText(update)
+			if text == "" {
+				continue
+			}
 			acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
 			structuredOutput = ""
 			structuredCallID = ""
@@ -363,7 +612,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 				onChunk(text)
 			}
 		case "tool_call":
-			if structuredEnabled && update.ToolCallID != "" {
+			if update.ToolCallID != "" {
 				if structuredOutput != "" {
 					structuredOutput = ""
 					structuredCallID = ""
@@ -375,7 +624,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 				activeTools[update.ToolCallID] = name
 			}
 		case "tool_call_update":
-			if !structuredEnabled || update.ToolCallID == "" {
+			if update.ToolCallID == "" {
 				continue
 			}
 			name, known := toolNames[update.ToolCallID]
@@ -411,12 +660,10 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			if acpxUpdateText(update) == "" {
 				continue
 			}
-			if structuredEnabled {
-				acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
-				if structuredOutput != "" {
-					structuredOutput = ""
-					structuredCallID = ""
-				}
+			acpxInvalidateActiveStructuredOutput(activeTools, structuredEligible)
+			if structuredOutput != "" {
+				structuredOutput = ""
+				structuredCallID = ""
 			}
 		}
 	}

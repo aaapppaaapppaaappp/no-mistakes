@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+pi="$root/node_modules/.bin/pi"
+if [ ! -x "$pi" ]; then
+  echo "no-mistakes structured output dependencies are missing; run \`npm ci --prefix integrations/pi --ignore-scripts\` from the trusted checkout" >&2
+  exit 127
+fi
+
+source_agent_dir=${PI_CODING_AGENT_DIR:-"${HOME:?HOME is required}/.pi/agent"}
+gate_agent_dir=$(mktemp -d "${TMPDIR:-/tmp}/no-mistakes-pi-gate-XXXXXXXX")
+chmod 700 "$gate_agent_dir"
+cleanup() {
+  rm -rf "$gate_agent_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+# Reuse the operator's provider catalogue and credentials without copying or
+# changing either file. Gate-owned settings disable every Pi retry layer.
+for name in models.json auth.json; do
+  if [ -f "$source_agent_dir/$name" ]; then
+    ln -s "$source_agent_dir/$name" "$gate_agent_dir/$name"
+  fi
+done
+cat >"$gate_agent_dir/settings.json" <<'JSON'
+{
+  "quietStartup": true,
+  "defaultProjectTrust": "never",
+  "retry": {
+    "enabled": false,
+    "maxRetries": 0,
+    "provider": { "maxRetries": 0 }
+  }
+}
+JSON
+chmod 600 "$gate_agent_dir/settings.json"
+
+set +e
+PI_CODING_AGENT_DIR="$gate_agent_dir" \
+NO_MISTAKES_PI_STRICT_RESPONSES=1 \
+"$pi" \
+  --no-extensions -e "$root/extensions/structured-output.mjs" \
+  --no-builtin-tools --tools structured_output \
+  --no-skills --no-prompt-templates --no-context-files --no-themes \
+  --no-approve --no-session --offline \
+  --provider no-mistakes-flash-next-responses \
+  --model Qwen/Qwen3.8-Flash-Next-FP8 \
+  --thinking xhigh \
+  "$@"
+status=$?
+set -e
+exit "$status"

@@ -179,6 +179,17 @@ Explicitly opt an ACP target into the repository-owned Ubuntu Pi structured-outp
 
 Set this only as the first `env` assignment in a trusted global [`acp_registry_overrides`](/no-mistakes/reference/global-config/#acp_registry_overrides) command. no-mistakes uses that trusted command provenance before accepting a completed `structured_output` tool result. The extension consumes the variable at load time so child Pi sessions do not inherit the opt-in. It is containment context, not authorization by itself.
 
+## `NO_MISTAKES_ACPX_ATTEMPTS`
+
+Select the explicit single-attempt ACP control for one trusted Pi exact-output target.
+
+|         |                                                                 |
+| ------- | --------------------------------------------------------------- |
+| Type    | exactly `1`; every other supplied value is refused               |
+| Default | unset (the existing no-mistakes retry behavior remains unchanged) |
+
+This is valid only as a standalone `env` assignment after `NO_MISTAKES_PI_STRUCTURED_OUTPUT=1` in trusted global `acp_registry_overrides`. It makes acpx's prompt retry count observably zero and disables no-mistakes' outer transient/parse retry for that invocation. The dedicated strict Responses wrapper independently disables Pi agent-level and provider retries, so there is exactly one process, ACP prompt, and persistent Pi session. Within that session only, the trusted extension may send at most two fixed format-repair nudges, bounding the invocation to three provider requests; these are continuation turns, not cold retries, and never quote model content. The invocation's process arguments, attempt records, and provider request count provide structured evidence of the control; it is not a generalized retry policy.
+
 ## `XDG_DATA_HOME`
 
 Data directory used to discover OpenCode transcripts for intent extraction.
