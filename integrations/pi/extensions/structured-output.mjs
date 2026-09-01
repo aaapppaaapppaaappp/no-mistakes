@@ -19,8 +19,6 @@ const REPAIR_NUDGES = Object.freeze({
     "FORMAT_REPAIR_REQUIRED: No completed structured_output call was received. Do not repeat analysis. Do not output prose. Call structured_output exactly once with every required field.",
   schema:
     "FORMAT_REPAIR_REQUIRED: The structured_output arguments did not validate against the required schema. Do not repeat analysis. Do not output prose. Call structured_output exactly once with every required field and valid field types.",
-  name:
-    "FORMAT_REPAIR_REQUIRED: The final function name was not structured_output. Do not repeat analysis. Do not output prose. Call structured_output exactly once with every required field.",
 });
 
 function loadGateSchema(env = process.env) {
@@ -154,9 +152,16 @@ function createStrictRepairController(pi, schemaValidator) {
   let repairNudges = 0;
   let completed = false;
   let turnDefect;
+  let hardStop;
+
+  const stop = (message) => {
+    hardStop ??= new Error(message);
+    throw hardStop;
+  };
 
   return {
     beginProviderRequest() {
+      if (hardStop) throw hardStop;
       providerRequests++;
       turnDefect = undefined;
       if (providerRequests > MAX_PROVIDER_REQUESTS) {
@@ -167,17 +172,17 @@ function createStrictRepairController(pi, schemaValidator) {
       if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
       const calls = message.content.filter((part) => part?.type === "toolCall");
       if (calls.length > 1) {
-        throw new Error("strict no-mistakes gate received multiple final tool calls");
+        stop("strict no-mistakes gate received multiple final tool calls");
       }
       if (calls.length === 0) return;
       const call = calls[0];
       if (call.name !== "structured_output") {
-        turnDefect = "name";
-        return;
+        stop("strict no-mistakes gate received a competing final tool call");
       }
       if (!schemaValidator.Check(call.arguments)) turnDefect = "schema";
     },
     accept(params) {
+      if (hardStop) throw hardStop;
       if (completed) throw new Error("strict no-mistakes gate received multiple completed structured_output calls");
       if (!schemaValidator.Check(params)) {
         turnDefect = "schema";
@@ -186,10 +191,11 @@ function createStrictRepairController(pi, schemaValidator) {
       completed = true;
     },
     finishTurn(event) {
+      if (hardStop) throw hardStop;
       if (completed) return;
       const message = event?.message;
       if (message?.role !== "assistant") {
-        throw new Error("strict no-mistakes gate reached an invalid terminal transport boundary");
+        stop("strict no-mistakes gate reached an invalid terminal transport boundary");
       }
       // Provider, timeout, quota, auth, cancellation, and transport failures are
       // terminal. Never convert them into a model-format repair request.

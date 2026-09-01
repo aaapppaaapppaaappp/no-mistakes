@@ -166,6 +166,34 @@ func TestAcpxAgent_StructuredOutputProseEmitsBoundedWarning(t *testing.T) {
 	}
 }
 
+func TestAcpxAgent_StructuredOutputProseWarningSurvivesProtocolFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NM_TEST_ACPX_ARGS_FILE", filepath.Join(dir, "args"))
+	t.Setenv("NM_TEST_ACPX_EVENT", `{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"discarded prose"}}}`+"\nnot-json")
+	a := &acpxAgent{
+		bin:        writeStubAcpx(t, dir),
+		target:     "pi-flash-next-responses-gate",
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 pi-acp",
+	}
+	var warnings []LifecycleEvent
+	_, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "test",
+		CWD:        dir,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}`),
+		OnLifecycle: func(event LifecycleEvent) {
+			if event.Phase == LifecyclePhaseWarning {
+				warnings = append(warnings, event)
+			}
+		},
+	})
+	if err == nil {
+		t.Fatal("Run succeeded, want protocol failure")
+	}
+	if len(warnings) != 1 || warnings[0].Message != "warning: ACP exact-output turn emitted assistant prose; ignored in favor of the native structured_output arguments" {
+		t.Fatalf("warnings = %#v, want one bounded prose-presence warning on failure", warnings)
+	}
+}
+
 func TestAcpxAgent_SingleAttemptDisablesEveryAcpxRetry(t *testing.T) {
 	dir := t.TempDir()
 	countFile := filepath.Join(dir, "count")
@@ -225,6 +253,8 @@ func TestAcpxAgent_SingleAttemptControlRefusesInvalidOrUntrustedValues(t *testin
 		{name: "multiple", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=2 pi-acp"},
 		{name: "malformed", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=once pi-acp"},
 		{name: "untrusted target", raw: "env NO_MISTAKES_ACPX_ATTEMPTS=1 pi-acp"},
+		{name: "argument assignment", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 pi-acp NO_MISTAKES_ACPX_ATTEMPTS=1"},
+		{name: "duplicate assignment", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 NO_MISTAKES_ACPX_ATTEMPTS=0 pi-acp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &acpxAgent{bin: "must-not-start", target: "pi", rawCommand: tc.raw}

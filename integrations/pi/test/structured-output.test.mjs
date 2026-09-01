@@ -6,8 +6,6 @@ import { join } from "node:path";
 import test from "node:test";
 
 import extension, {
-  MAX_PROVIDER_REQUESTS,
-  MAX_REPAIR_NUDGES,
   MAX_SCHEMA_BYTES,
   REPAIR_NUDGES,
   STRICT_MODEL,
@@ -309,23 +307,39 @@ test("repair classifies only objective format defects and caps provider turns", 
   assert.equal(sent[0], REPAIR_NUDGES.schema);
 
   repair.beginProviderRequest();
-  repair.observeMessage({ role: "assistant", content: [{
-    type: "toolCall", name: "structured-ouput", arguments: { summary: "ok" },
-  }] });
-  repair.finishTurn({ message: { role: "assistant", stopReason: "toolUse" } });
-  assert.equal(sent[1], REPAIR_NUDGES.name);
-
-  repair.beginProviderRequest();
   assert.throws(
-    () => repair.finishTurn({ message: { role: "assistant", stopReason: "stop" } }),
-    /exhausted two same-session format repairs/,
+    () => repair.observeMessage({ role: "assistant", content: [{
+      type: "toolCall", name: "structured-ouput", arguments: { summary: "ok" },
+    }] }),
+    /competing final tool call/,
   );
+  assert.throws(
+    () => repair.finishTurn({ message: { role: "assistant", stopReason: "toolUse" } }),
+    /competing final tool call/,
+  );
+
   assert.deepEqual(repair.state(), {
-    providerRequests: MAX_PROVIDER_REQUESTS,
-    repairNudges: MAX_REPAIR_NUDGES,
+    providerRequests: 2,
+    repairNudges: 1,
     completed: false,
   });
-  assert.throws(() => repair.beginProviderRequest(), /provider-request cap/);
+  assert.equal(sent.length, 1);
+
+  const bounded = createStrictRepairController(
+    { sendUserMessage: (text) => sent.push(text) },
+    { Check: () => true },
+  );
+  bounded.beginProviderRequest();
+  bounded.finishTurn({ message: { role: "assistant", stopReason: "stop" } });
+  bounded.beginProviderRequest();
+  bounded.finishTurn({ message: { role: "assistant", stopReason: "stop" } });
+  bounded.beginProviderRequest();
+  assert.throws(
+    () => bounded.finishTurn({ message: { role: "assistant", stopReason: "stop" } }),
+    /exhausted two same-session format repairs/,
+  );
+  assert.deepEqual(bounded.state(), { providerRequests: 3, repairNudges: 2, completed: false });
+  assert.throws(() => bounded.beginProviderRequest(), /provider-request cap/);
 });
 
 test("repair hard-stops multiple calls and does not nudge provider failures", () => {
@@ -340,6 +354,10 @@ test("repair hard-stops multiple calls and does not nudge provider failures", ()
     { type: "toolCall", name: "structured_output", arguments: {} },
     { type: "toolCall", name: "structured_output", arguments: {} },
   ] }), /multiple final tool calls/);
+  assert.throws(
+    () => repair.finishTurn({ message: { role: "assistant", stopReason: "toolUse" } }),
+    /multiple final tool calls/,
+  );
 
   const failed = createStrictRepairController(
     { sendUserMessage: (text) => sent.push(text) },

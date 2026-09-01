@@ -115,6 +115,13 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	var usage TokenUsage
 	_, singleAttempt := acpxRawCommandEnvValue(a.rawCommand, acpxSingleAttemptEnvVar)
 	var protocolEvidence acpxProtocolEvidence
+	warnProse := func() {
+		if !protocolEvidence.assistantProse {
+			return
+		}
+		emitAgentWarning(opts, a.Name(), "warning: ACP exact-output turn emitted assistant prose; ignored in favor of the native structured_output arguments")
+		protocolEvidence.assistantProse = false
+	}
 	text, stdoutErr, err := parseAcpxJSONEventsWithEvidence(
 		ctx,
 		started.stdout,
@@ -129,6 +136,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		stderrWG.Wait()
 		err = errors.Join(err, acpxStdinError(<-stdinErrCh))
 		retErr := fmt.Errorf("acpx parse events: %w", err)
+		warnProse()
 		emitAgentExited(opts, a.Name(), pid, retErr)
 		return nil, retErr
 	}
@@ -137,6 +145,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	stdinErr := acpxStdinError(<-stdinErrCh)
 	if waitErr != nil {
 		retErr := fmt.Errorf("acpx exited: %w: %s", errors.Join(waitErr, stdinErr), acpxProcessErrorOutput(stderrBuf, stdoutErr))
+		warnProse()
 		emitAgentExited(opts, a.Name(), pid, retErr)
 		return nil, retErr
 	}
@@ -144,12 +153,11 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		if out := acpxProcessErrorOutput(stderrBuf, stdoutErr); out != "" {
 			stdinErr = fmt.Errorf("%w: %s", stdinErr, out)
 		}
+		warnProse()
 		emitAgentExited(opts, a.Name(), pid, stdinErr)
 		return nil, stdinErr
 	}
-	if protocolEvidence.assistantProse {
-		emitAgentWarning(opts, a.Name(), "warning: ACP exact-output turn emitted assistant prose; ignored in favor of the native structured_output arguments")
-	}
+	warnProse()
 	if usage.OutputTokens == 0 {
 		usage.OutputTokens = estimateAcpxTokens(len(text))
 	}
@@ -159,11 +167,16 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 }
 
 func acpxStructuredOutputOptedIn(rawCommand string) bool {
-	return strings.HasPrefix(strings.TrimSpace(rawCommand), "env "+acpxStructuredOutputEnvVar+"=1 ")
+	assignments, err := acpxLeadingEnvAssignments(rawCommand)
+	return err == nil && assignments[acpxStructuredOutputEnvVar] == "1"
 }
 
 func acpxMaxRetries(rawCommand string) (int, error) {
-	value, present := acpxRawCommandEnvValue(rawCommand, acpxSingleAttemptEnvVar)
+	assignments, err := acpxLeadingEnvAssignments(rawCommand)
+	if err != nil {
+		return 0, err
+	}
+	value, present := assignments[acpxSingleAttemptEnvVar]
 	if !present {
 		return claudeMaxRetries, nil
 	}
@@ -176,17 +189,65 @@ func acpxMaxRetries(rawCommand string) (int, error) {
 	return 0, nil
 }
 
-// acpxRawCommandEnvValue recognizes only a standalone env assignment. The raw
+func acpxLeadingEnvAssignments(rawCommand string) (map[string]string, error) {
+	tokens := strings.Fields(strings.TrimSpace(rawCommand))
+	assignments := make(map[string]string)
+	if len(tokens) == 0 {
+		return assignments, nil
+	}
+	if tokens[0] != "env" {
+		for _, token := range tokens {
+			if name, _, ok := acpxAssignment(token); ok && acpxControlledEnvName(name) {
+				return nil, fmt.Errorf("%s must be a leading env assignment", name)
+			}
+		}
+		return assignments, nil
+	}
+	for i := 1; i < len(tokens); i++ {
+		name, value, ok := acpxAssignment(tokens[i])
+		if !ok {
+			for _, token := range tokens[i:] {
+				if trailingName, _, trailingOK := acpxAssignment(token); trailingOK && acpxControlledEnvName(trailingName) {
+					return nil, fmt.Errorf("%s must be a leading env assignment", trailingName)
+				}
+			}
+			return assignments, nil
+		}
+		if acpxControlledEnvName(name) {
+			if _, duplicate := assignments[name]; duplicate {
+				return nil, fmt.Errorf("duplicate %s assignment", name)
+			}
+			if name == acpxStructuredOutputEnvVar && i != 1 {
+				return nil, fmt.Errorf("%s must be the first env assignment", name)
+			}
+		}
+		assignments[name] = value
+	}
+	return assignments, nil
+}
+
+func acpxAssignment(token string) (name, value string, ok bool) {
+	if !isEnvAssignment(token) {
+		return "", "", false
+	}
+	name, value, _ = strings.Cut(token, "=")
+	return name, value, true
+}
+
+func acpxControlledEnvName(name string) bool {
+	return name == acpxStructuredOutputEnvVar || name == acpxSingleAttemptEnvVar
+}
+
+// acpxRawCommandEnvValue recognizes only a leading env assignment. The raw
 // command is trusted global configuration, but deliberately is not parsed as a
 // shell language here: quoting or expansion cannot silently activate a gate.
 func acpxRawCommandEnvValue(rawCommand, name string) (string, bool) {
-	prefix := name + "="
-	for _, field := range strings.Fields(strings.TrimSpace(rawCommand)) {
-		if strings.HasPrefix(field, prefix) {
-			return strings.TrimPrefix(field, prefix), true
-		}
+	assignments, err := acpxLeadingEnvAssignments(rawCommand)
+	if err != nil {
+		return "", false
 	}
-	return "", false
+	value, ok := assignments[name]
+	return value, ok
 }
 
 func (a *acpxAgent) Close() error { return nil }
@@ -402,6 +463,7 @@ func parseAcpxJSONEventsWithEvidence(ctx context.Context, r io.Reader, onChunk f
 	var structuredCallID string
 	var structuredCalls int
 	var protocolReason string
+	var wrongToolSeen bool
 	activeTools := make(map[string]string)
 
 	failProtocol := func(reason string) {
@@ -476,6 +538,8 @@ func parseAcpxJSONEventsWithEvidence(ctx context.Context, r io.Reader, onChunk f
 			name := acpxStructuredToolName(update)
 			if name == "" {
 				failProtocol("tool call is missing a name")
+			} else if name != "structured_output" {
+				wrongToolSeen = true
 			}
 			if _, duplicateID := activeTools[update.ToolCallID]; duplicateID {
 				failProtocol("duplicate tool call id was emitted")
@@ -502,7 +566,7 @@ func parseAcpxJSONEventsWithEvidence(ctx context.Context, r io.Reader, onChunk f
 			}
 			switch update.Status {
 			case "failed":
-				// The strict Pi extension may repair a schema/field/tool-name
+				// The strict Pi extension may repair a schema/field
 				// formatting failure in the same session. A failed final-tool
 				// attempt has no authoritative result and no side effects.
 				delete(activeTools, update.ToolCallID)
@@ -546,6 +610,9 @@ func parseAcpxJSONEventsWithEvidence(ctx context.Context, r io.Reader, onChunk f
 	}
 	if len(activeTools) != 0 {
 		return "", stdoutErr, acpxProtocolError("tool call remained incomplete at end of stream")
+	}
+	if wrongToolSeen {
+		return "", stdoutErr, acpxProtocolError("competing tool call was emitted")
 	}
 	if structuredCalls == 0 {
 		return "", stdoutErr, acpxProtocolError("no structured_output call completed")

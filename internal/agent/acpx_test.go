@@ -776,7 +776,7 @@ func TestParseAcpxJSONEvents_RejectsStructuredOutputBeforeSubsequentWork(t *test
 	assertACPXProtocolError(t, out, err, "competing tool")
 }
 
-func TestParseAcpxJSONEvents_AcceptsSameSessionRepairAfterFailedToolName(t *testing.T) {
+func TestParseAcpxJSONEvents_RejectsSameSessionRepairAfterFailedToolName(t *testing.T) {
 	events := strings.Join([]string{
 		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"read","title":"read","status":"in_progress"}}}`,
 		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"read","status":"failed"}}}`,
@@ -785,12 +785,7 @@ func TestParseAcpxJSONEvents_AcceptsSameSessionRepairAfterFailedToolName(t *test
 	}, "\n")
 	var usage TokenUsage
 	out, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, true)
-	if err != nil {
-		t.Fatalf("parseAcpxJSONEvents: %v", err)
-	}
-	if out != `{"status":"complete"}` {
-		t.Fatalf("output = %q, want repaired native structured output", out)
-	}
+	assertACPXProtocolError(t, out, err, "competing tool")
 }
 
 func TestParseAcpxJSONEvents_AcceptsSameSessionRepairAfterSchemaFailure(t *testing.T) {
