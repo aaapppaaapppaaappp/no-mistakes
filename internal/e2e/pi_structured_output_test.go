@@ -363,10 +363,12 @@ func TestAcpxPiStrictResponsesGateRepairsWithinOneAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requests.Load() != 2 || string(starts) != "x" || attempts != 1 || bytes.Count(events, []byte(`"method":"session/prompt"`)) != 1 {
-		t.Fatalf("provider requests=%d Pi processes=%q no-mistakes attempts=%d ACP prompts=%d; want two turns in one process/attempt/session", requests.Load(), starts, attempts, bytes.Count(events, []byte(`"method":"session/prompt"`)))
+	acpPrompts := bytes.Count(events, []byte(`"method":"session/prompt"`))
+	if requests.Load() != 2 || string(starts) != "x" || attempts != 1 || acpPrompts != 1 {
+		t.Fatalf("provider requests=%d Pi processes=%q no-mistakes attempts=%d ACP prompts=%d; want two turns in one process/attempt/session", requests.Load(), starts, attempts, acpPrompts)
 	}
 	sum := sha256.Sum256(schema)
+	t.Logf("strict Responses result=%s provider_requests=%d pi_processes=%d no_mistakes_attempts=%d acp_prompts=%d same_session=true fixed_repair_nudge=true", res.Text, requests.Load(), len(starts), attempts, acpPrompts)
 	t.Logf("strict Responses repaired request sha256=%x schema sha256=%x", sha256.Sum256(body), sum)
 }
 
@@ -454,6 +456,7 @@ func TestAcpxPiStrictResponsesRouteDriftCannotReachProvider(t *testing.T) {
 	if string(starts) != "x" {
 		t.Fatalf("Pi process starts = %q, want one executable process", starts)
 	}
+	t.Logf("strict Responses route drift rejected=true provider_requests=%d pi_processes=%d", requests.Load(), len(starts))
 }
 
 func agentcfgProfile(model string) agentcfg.Profile {
