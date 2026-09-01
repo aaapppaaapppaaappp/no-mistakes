@@ -19,6 +19,11 @@ const MAX_SCHEMA_BYTES = 1024 * 1024;
 const MAX_PROVIDER_REQUESTS = 3;
 const MAX_REPAIR_NUDGES = 2;
 const REPAIRABLE_RAW_STOP_REASON = "completed";
+const STRICT_REQUEST_KEYS = new Set([
+  "include", "include_reasoning", "input", "max_output_tokens", "model", "parallel_tool_calls",
+  "prompt_cache_key", "prompt_cache_options", "prompt_cache_retention", "reasoning", "seed", "store", "stream", "temperature",
+  "tool_choice", "tools", "top_p",
+]);
 const REPAIR_NUDGES = Object.freeze({
   missing:
     "FORMAT_REPAIR_REQUIRED: No completed structured_output call was received. Do not repeat analysis. Do not output prose. Call structured_output exactly once with every required field.",
@@ -117,6 +122,7 @@ export default async function structuredOutputExtension(pi, options = {}) {
     const Compile = await (options.loadCompile ?? loadTypeBoxCompile)();
     schemaValidator = Compile(schema);
     strictRepair = createStrictRepairController(pi, schemaValidator);
+    installStrictResponsesTransportGuard(options.fetchTarget ?? globalThis);
   }
 
   pi.registerTool({
@@ -267,6 +273,60 @@ function createStrictRepairController(pi, schemaValidator) {
   };
 }
 
+function validateStrictResponsesSSE(text) {
+  let terminal;
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    let event;
+    try {
+      event = JSON.parse(data);
+    } catch {
+      throw new Error("strict no-mistakes gate received malformed Responses SSE JSON");
+    }
+    if (event.type === "response.failed" || event.type === "response.incomplete") {
+      throw new Error("strict no-mistakes gate received a failed or incomplete Responses terminal event");
+    }
+    if (event.type === "response.output_item.done" && event.item?.type === "function_call" &&
+        event.item.status !== "completed") {
+      throw new Error("strict no-mistakes gate received an unsettled Responses function item");
+    }
+    if (event.type === "response.completed") {
+      if (terminal) throw new Error("strict no-mistakes gate received multiple Responses terminal events");
+      terminal = event.response;
+    }
+  }
+  if (!terminal || terminal.status !== "completed" || terminal.error || terminal.incomplete_details) {
+    throw new Error("strict no-mistakes gate received an invalid Responses terminal status");
+  }
+  for (const item of terminal.output ?? []) {
+    if (item?.type === "function_call" && item.status !== "completed") {
+      throw new Error("strict no-mistakes gate received an unsettled terminal function item");
+    }
+  }
+}
+
+function installStrictResponsesTransportGuard(target) {
+  if (!target || typeof target.fetch !== "function") {
+    throw new Error("strict no-mistakes gate requires a fetch transport boundary");
+  }
+  if (target.__noMistakesStrictResponsesFetch) return;
+  const originalFetch = target.fetch.bind(target);
+  target.fetch = async (...args) => {
+    const response = await originalFetch(...args);
+    if (response.ok) {
+      const contentType = response.headers?.get?.("content-type") ?? "";
+      if (!contentType.includes("text/event-stream")) {
+        throw new Error("strict no-mistakes gate requires a Responses SSE transport");
+      }
+      validateStrictResponsesSSE(await response.clone().text());
+    }
+    return response;
+  };
+  Object.defineProperty(target, "__noMistakesStrictResponsesFetch", { value: true });
+}
+
 function enforceStrictResponsesRequest(payload, ctx, pi, schema) {
   const model = ctx?.model;
   if (model?.provider !== STRICT_PROVIDER || model?.id !== STRICT_MODEL || model?.api !== "openai-responses") {
@@ -284,8 +344,17 @@ function enforceStrictResponsesRequest(payload, ctx, pi, schema) {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("strict no-mistakes gate received a malformed provider payload");
   }
+  if (Object.keys(payload).some((key) => !STRICT_REQUEST_KEYS.has(key))) {
+    throw new Error("strict no-mistakes gate received an unexpected request override");
+  }
   if (payload.model !== STRICT_MODEL || !Array.isArray(payload.input) || payload.stream !== true) {
     throw new Error("strict no-mistakes gate received an inconsistent Responses payload");
+  }
+  if (payload.include !== undefined && !isDeepStrictEqual(payload.include, ["reasoning.encrypted_content"])) {
+    throw new Error("strict no-mistakes gate received an unexpected Responses include selector");
+  }
+  if (payload.prompt_cache_retention !== undefined || payload.prompt_cache_options !== undefined) {
+    throw new Error("strict no-mistakes gate received an unexpected prompt-cache override");
   }
   if (!Array.isArray(payload.tools) || payload.tools.length !== 1) {
     throw new Error("strict no-mistakes gate requires exactly one serialized tool");
@@ -299,8 +368,9 @@ function enforceStrictResponsesRequest(payload, ctx, pi, schema) {
   if (payload.reasoning?.effort !== "xhigh") {
     throw new Error("strict no-mistakes gate payload lost xhigh reasoning");
   }
-  if (payload.temperature !== STRICT_TEMPERATURE || payload.top_p !== STRICT_TOP_P || payload.seed !== STRICT_SEED) {
-    throw new Error("strict no-mistakes gate payload lost pinned sampling parameters");
+  if (payload.temperature !== STRICT_TEMPERATURE || payload.top_p !== STRICT_TOP_P || payload.seed !== STRICT_SEED ||
+      payload.max_output_tokens !== 4096 || payload.store !== false) {
+    throw new Error("strict no-mistakes gate payload lost pinned request parameters");
   }
 
   const result = {
@@ -330,5 +400,7 @@ export {
   acceptedGateSchema,
   createStrictRepairController,
   enforceStrictResponsesRequest,
+  installStrictResponsesTransportGuard,
   loadGateSchema,
+  validateStrictResponsesSSE,
 };

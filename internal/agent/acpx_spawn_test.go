@@ -255,11 +255,14 @@ func TestAcpxAgent_SingleAttemptControlRefusesInvalidOrUntrustedValues(t *testin
 		{name: "untrusted target", raw: "env NO_MISTAKES_ACPX_ATTEMPTS=1 pi-acp"},
 		{name: "argument assignment", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 pi-acp NO_MISTAKES_ACPX_ATTEMPTS=1"},
 		{name: "duplicate assignment", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 NO_MISTAKES_ACPX_ATTEMPTS=0 pi-acp"},
+		{name: "single quoted controls", raw: "env 'NO_MISTAKES_PI_STRUCTURED_OUTPUT=1' 'NO_MISTAKES_ACPX_ATTEMPTS=1' pi-acp"},
+		{name: "double quoted controls", raw: `env "NO_MISTAKES_PI_STRUCTURED_OUTPUT=1" "NO_MISTAKES_ACPX_ATTEMPTS=1" pi-acp`},
+		{name: "escaped controls", raw: `env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS\=1 pi-acp`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &acpxAgent{bin: "must-not-start", target: "pi", rawCommand: tc.raw}
 			_, err := a.Run(context.Background(), RunOpts{})
-			if err == nil || !strings.Contains(err.Error(), acpxSingleAttemptEnvVar) {
+			if err == nil || (!strings.Contains(err.Error(), acpxSingleAttemptEnvVar) && !strings.Contains(err.Error(), acpxStructuredOutputEnvVar)) {
 				t.Fatalf("Run error = %v, want invalid control refusal", err)
 			}
 		})

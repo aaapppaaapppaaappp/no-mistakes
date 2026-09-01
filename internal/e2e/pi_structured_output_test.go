@@ -324,9 +324,18 @@ func TestAcpxPiStrictResponsesGateRepairsWithinOneAttempt(t *testing.T) {
 	if bytes.Equal(firstBody, body) {
 		t.Fatal("repair provider turn repeated the original payload instead of continuing the same session with a nudge")
 	}
+	var firstPayload map[string]any
+	if err := json.Unmarshal(firstBody, &firstPayload); err != nil {
+		t.Fatalf("decode initial provider request: %v\n%s", err, firstBody)
+	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf("decode provider request: %v\n%s", err, body)
+	}
+	firstSessionID, firstHasSessionID := firstPayload["prompt_cache_key"].(string)
+	repairSessionID, repairHasSessionID := payload["prompt_cache_key"].(string)
+	if !firstHasSessionID || firstSessionID == "" || !repairHasSessionID || repairSessionID != firstSessionID {
+		t.Fatalf("provider session identity changed across repair: initial=%q repair=%q", firstSessionID, repairSessionID)
 	}
 	tools, ok := payload["tools"].([]any)
 	if !ok || len(tools) != 1 {

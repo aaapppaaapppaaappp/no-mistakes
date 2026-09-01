@@ -12,6 +12,7 @@ import extension, {
   STRICT_PROVIDER,
   createStrictRepairController,
   enforceStrictResponsesRequest,
+  validateStrictResponsesSSE,
 } from "../extensions/structured-output.mjs";
 
 async function withEnvironment(values, fn) {
@@ -208,7 +209,7 @@ test("strict Responses activation marks the sole tool for required constrained s
       registerTool: (tool) => tools.push(tool),
       on: (name, handler) => handlers.set(name, handler),
       getActiveTools: () => ["structured_output"],
-    }, { env });
+    }, { env, fetchTarget: { fetch: async () => { throw new Error("not called"); } } });
     assert.equal(tools.length, 1);
     assert.deepEqual(tools[0].constrainedSampling, { type: "json_schema", strict: "require" });
     assert.equal(typeof handlers.get("before_provider_request"), "function");
@@ -235,6 +236,8 @@ test("strict Responses request hook is exact and refuses other routes", () => {
     temperature: 1,
     top_p: 0.95,
     seed: 424242,
+    max_output_tokens: 4096,
+    store: false,
   };
   const pi = { getActiveTools: () => ["structured_output"] };
   const ctx = {
@@ -272,15 +275,45 @@ test("strict Responses request hook is exact and refuses other routes", () => {
   );
   assert.throws(
     () => enforceStrictResponsesRequest({ ...payload, temperature: 0.2 }, ctx, pi, schema),
-    /pinned sampling parameters/,
+    /pinned request parameters/,
   );
   assert.throws(
     () => enforceStrictResponsesRequest({ ...payload, top_p: 0.8 }, ctx, pi, schema),
-    /pinned sampling parameters/,
+    /pinned request parameters/,
   );
   assert.throws(
     () => enforceStrictResponsesRequest({ ...payload, seed: 99 }, ctx, pi, schema),
-    /pinned sampling parameters/,
+    /pinned request parameters/,
+  );
+  assert.throws(
+    () => enforceStrictResponsesRequest({ ...payload, store: true }, ctx, pi, schema),
+    /pinned request parameters/,
+  );
+  assert.throws(
+    () => enforceStrictResponsesRequest({ ...payload, unexpected_override: true }, ctx, pi, schema),
+    /unexpected request override/,
+  );
+});
+
+test("Responses transport guard requires completed function-item status", () => {
+  const event = (type, value) => `event: ${type}\ndata: ${JSON.stringify(value)}\n\n`;
+  const valid = event("response.output_item.done", {
+    type: "response.output_item.done",
+    item: { type: "function_call", name: "structured_output", status: "completed" },
+  }) + event("response.completed", {
+    type: "response.completed",
+    response: { status: "completed", error: null, incomplete_details: null, output: [
+      { type: "function_call", name: "structured_output", status: "completed" },
+    ] },
+  }) + "data: [DONE]\n\n";
+  assert.doesNotThrow(() => validateStrictResponsesSSE(valid));
+  assert.throws(
+    () => validateStrictResponsesSSE(valid.replace('"status":"completed"', '"status":"in_progress"')),
+    /unsettled Responses function item/,
+  );
+  assert.throws(
+    () => validateStrictResponsesSSE(event("response.incomplete", { type: "response.incomplete" })),
+    /failed or incomplete/,
   );
 });
 
@@ -441,7 +474,7 @@ test("route drift aborts the Pi turn and blocks result authority", async () => {
       registerTool() {},
       on: (name, handler) => handlers.set(name, handler),
       getActiveTools: () => ["structured_output"],
-    }, { env, loadCompile });
+    }, { env, loadCompile, fetchTarget: { fetch: async () => { throw new Error("not called"); } } });
     const payload = {
       model: STRICT_MODEL,
       input: [{ role: "user", content: "review" }],
@@ -466,7 +499,7 @@ test("route drift aborts the Pi turn and blocks result authority", async () => {
     assert.deepEqual(blocked, {
       block: true,
       terminate: true,
-      reason: "strict no-mistakes gate payload lost pinned sampling parameters",
+      reason: "strict no-mistakes gate payload lost pinned request parameters",
     });
   } finally {
     file.cleanup();

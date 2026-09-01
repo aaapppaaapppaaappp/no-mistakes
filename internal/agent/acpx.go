@@ -197,17 +197,23 @@ func acpxLeadingEnvAssignments(rawCommand string) (map[string]string, error) {
 	}
 	if tokens[0] != "env" {
 		for _, token := range tokens {
-			if name, _, ok := acpxAssignment(token); ok && acpxControlledEnvName(name) {
-				return nil, fmt.Errorf("%s must be a leading env assignment", name)
+			if name, found := acpxPotentialControlledEnvName(token); found {
+				return nil, fmt.Errorf("%s must be an unquoted leading env assignment", name)
 			}
 		}
 		return assignments, nil
 	}
 	for i := 1; i < len(tokens); i++ {
 		name, value, ok := acpxAssignment(tokens[i])
+		if controlled, found := acpxPotentialControlledEnvName(tokens[i]); found && (!ok || name != controlled || strings.ContainsAny(tokens[i], `'"\\`)) {
+			return nil, fmt.Errorf("%s must be an unquoted leading env assignment", controlled)
+		}
 		if !ok {
+			if controlled, found := acpxPotentialControlledEnvName(tokens[i]); found {
+				return nil, fmt.Errorf("%s must be an unquoted leading env assignment", controlled)
+			}
 			for _, token := range tokens[i:] {
-				if trailingName, _, trailingOK := acpxAssignment(token); trailingOK && acpxControlledEnvName(trailingName) {
+				if trailingName, found := acpxPotentialControlledEnvName(token); found {
 					return nil, fmt.Errorf("%s must be a leading env assignment", trailingName)
 				}
 			}
@@ -236,6 +242,15 @@ func acpxAssignment(token string) (name, value string, ok bool) {
 
 func acpxControlledEnvName(name string) bool {
 	return name == acpxStructuredOutputEnvVar || name == acpxSingleAttemptEnvVar
+}
+
+func acpxPotentialControlledEnvName(token string) (string, bool) {
+	// acpx eventually evaluates the trusted command as shell syntax. Refuse any
+	// quoted or escaped spelling that strings.Fields cannot interpret exactly,
+	// rather than letting the child activate a control the parent did not see.
+	normalized := strings.NewReplacer("'", "", `"`, "", "\\", "").Replace(token)
+	name, _, ok := strings.Cut(normalized, "=")
+	return name, ok && acpxControlledEnvName(name)
 }
 
 // acpxRawCommandEnvValue recognizes only a leading env assignment. The raw
@@ -492,8 +507,11 @@ func parseAcpxJSONEventsWithEvidence(ctx context.Context, r io.Reader, onChunk f
 			continue
 		}
 		markAcpxUsagePresence(line, &msg)
-		if msg.Error != nil && msg.Error.Message != "" && stdoutErr == "" {
-			stdoutErr = msg.Error.Message
+		if msg.Error != nil && msg.Error.Message != "" {
+			if stdoutErr == "" {
+				stdoutErr = msg.Error.Message
+			}
+			failProtocol("ACP JSON-RPC error: " + msg.Error.Message)
 		}
 		*usage = acpxMaxUsage(*usage, acpxUsageFieldsToTokenUsage(msg.Result.Usage))
 		if msg.Method != "session/update" {
@@ -530,6 +548,9 @@ func parseAcpxJSONEventsWithEvidence(ctx context.Context, r io.Reader, onChunk f
 		case "tool_call":
 			if !structuredEnabled {
 				continue
+			}
+			if structuredCalls > 0 {
+				failProtocol("tool activity followed the authoritative structured_output completion")
 			}
 			if update.ToolCallID == "" {
 				failProtocol("tool call is missing an id")

@@ -773,7 +773,7 @@ func TestParseAcpxJSONEvents_RejectsStructuredOutputBeforeSubsequentWork(t *test
 	}, "\n")
 	var usage TokenUsage
 	out, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, true)
-	assertACPXProtocolError(t, out, err, "competing tool")
+	assertACPXProtocolError(t, out, err, "tool activity followed")
 }
 
 func TestParseAcpxJSONEvents_RejectsSameSessionRepairAfterFailedToolName(t *testing.T) {
@@ -851,6 +851,29 @@ func assertACPXProtocolError(t *testing.T, out string, err error, reason string)
 	}
 }
 
+func TestParseAcpxJSONEvents_StrictRejectsJSONRPCErrorAfterValidTool(t *testing.T) {
+	events := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"ok\"}"}}]}}}`,
+		`{"error":{"message":"quota exceeded"}}`,
+	}, "\n")
+	var usage TokenUsage
+	out, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, true)
+	assertACPXProtocolError(t, out, err, "ACP JSON-RPC error")
+}
+
+func TestParseAcpxJSONEvents_StrictRejectsFailedCallAfterAuthority(t *testing.T) {
+	events := strings.Join([]string{
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"first","title":"structured_output","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"first","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"ok\"}"}}]}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"second","title":"structured_output","status":"in_progress"}}}`,
+		`{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"second","status":"failed"}}}`,
+	}, "\n")
+	var usage TokenUsage
+	out, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, true)
+	assertACPXProtocolError(t, out, err, "tool activity followed")
+}
+
 func TestParseAcpxJSONEvents_StrictProtocolRejectsTerminalAnomalies(t *testing.T) {
 	complete := `{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"ok\"}"}}]}}}`
 	start := `{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}`
@@ -860,7 +883,7 @@ func TestParseAcpxJSONEvents_StrictProtocolRejectsTerminalAnomalies(t *testing.T
 		reason string
 	}{
 		{name: "zero calls", reason: "no structured_output"},
-		{name: "multiple calls", events: []string{start, complete, strings.ReplaceAll(start, "structured\"", "second\""), strings.ReplaceAll(complete, "structured\"", "second\"")}, reason: "completed more than once"},
+		{name: "multiple calls", events: []string{start, complete, strings.ReplaceAll(start, "structured\"", "second\""), strings.ReplaceAll(complete, "structured\"", "second\"")}, reason: "tool activity followed"},
 		{name: "wrong tool incomplete", events: []string{strings.ReplaceAll(start, "structured_output", "read")}, reason: "incomplete"},
 		{name: "wrong tool completed", events: []string{strings.ReplaceAll(start, "structured_output", "read"), strings.ReplaceAll(complete, `"text":"{\"summary\":\"ok\"}"`, `"text":"ignored"`)}, reason: "competing tool"},
 		{name: "failed without repair", events: []string{start, `{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"failed"}}}`}, reason: "no structured_output"},
