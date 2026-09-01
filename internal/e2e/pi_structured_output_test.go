@@ -357,6 +357,92 @@ func TestAcpxPiStrictResponsesGateRepairsWithinOneAttempt(t *testing.T) {
 	t.Logf("strict Responses repaired request sha256=%x schema sha256=%x", sha256.Sum256(body), sum)
 }
 
+func TestAcpxPiStrictResponsesRouteDriftCannotReachProvider(t *testing.T) {
+	integrationPath, err := filepath.Abs(filepath.Join("..", "..", "integrations", "pi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(integrationPath, "node_modules", ".bin")
+	realAcpx := filepath.Join(binDir, "acpx")
+	piACP := filepath.Join(binDir, "pi-acp")
+	for _, path := range []string{realAcpx, filepath.Join(binDir, "pi"), piACP} {
+		if info, statErr := os.Stat(path); statErr != nil || info.IsDir() {
+			t.Fatalf("pinned executable %s is missing; run npm ci --prefix integrations/pi --ignore-scripts", path)
+		}
+	}
+
+	var requests atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unexpected strict route request", http.StatusBadRequest)
+	}))
+	defer provider.Close()
+
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "source-agent")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	models := fmt.Sprintf(`{
+  "providers": {"no-mistakes-flash-next-responses": {
+    "baseUrl": %q, "apiKey": "credential-neutral-fixture", "api": "openai-responses",
+    "compat": {"supportsStrictMode": true},
+    "models": [{
+      "id": "Qwen/Qwen3.8-Flash-Next-FP8", "reasoning": true,
+      "thinkingLevelMap": {"off": null, "xhigh": "xhigh"},
+      "contextWindow": 262144, "maxTokens": 4096,
+      "samplingParams": {"temperature": 0.2, "top_p": 0.95, "seed": 424242}
+    }]
+  }}
+}`, provider.URL+"/v1")
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(models), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	piStarts := filepath.Join(dir, "pi-starts")
+	countingWrapper := filepath.Join(dir, "pi-gate-counting-wrapper")
+	dedicatedWrapper := filepath.Join(integrationPath, "bin", "pi-no-mistakes-flash-next-responses-acp")
+	wrapperScript := fmt.Sprintf("#!/bin/sh\nprintf x >> %q\nexec %q \"$@\"\n", piStarts, dedicatedWrapper)
+	if err := os.WriteFile(countingWrapper, []byte(wrapperScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	rawCommand := fmt.Sprintf(
+		"env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=%q %q",
+		countingWrapper, piACP,
+	)
+	a, err := agent.NewWithOptions(types.AgentName("acp:pi-flash-next-responses-gate"), realAcpx, nil, agent.Options{
+		ACPRegistryOverrides: map[string]string{"pi-flash-next-responses-gate": rawCommand},
+		Profile:              agentcfgProfile("no-mistakes-flash-next-responses/Qwen/Qwen3.8-Flash-Next-FP8"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = a.Run(ctx, agent.RunOpts{
+		Prompt:     "Return the fixture result",
+		CWD:        dir,
+		Env:        []string{"HOME=" + dir, "PI_CODING_AGENT_DIR=" + agentDir},
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}`),
+	})
+	if err == nil {
+		t.Fatal("strict route drift unexpectedly completed")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("provider requests = %d, want route drift to abort before HTTP", requests.Load())
+	}
+	starts, readErr := os.ReadFile(piStarts)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(starts) != "x" {
+		t.Fatalf("Pi process starts = %q, want one executable process", starts)
+	}
+}
+
 func agentcfgProfile(model string) agentcfg.Profile {
 	return agentcfg.Profile{Model: model}
 }

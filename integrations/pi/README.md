@@ -11,11 +11,11 @@ See the [global configuration reference](../../docs/src/content/docs/reference/g
 After the existing gate marker, opt-in, owner/mode, exact schema bytes, digest, and Draft-07 checks pass, the extension:
 
 - requires Pi/pi-ai JSON-Schema constrained sampling (`strict: true`);
-- verifies the exact provider/model/API/xhigh and one-tool payload;
+- verifies the exact provider/model/API/xhigh, loaded schema, one-tool payload, and fixture sampling pins;
 - forces Responses `tool_choice: "required"` and `parallel_tool_calls: false`;
 - suppresses returned private reasoning while retaining usage accounting.
 
-The hook throws rather than mutating any ordinary Pi, Chat Completions, other-model, other-provider, multi-tool, or untrusted turn. `NO_MISTAKES_PI_STRICT_RESPONSES=1` is wrapper-internal and is consumed before child tools run.
+The strict request boundary aborts route drift before the provider call and blocks any result that races with the abort; ordinary Pi, Chat Completions, other-model, other-provider, multi-tool, and untrusted turns remain untouched. `NO_MISTAKES_PI_STRICT_RESPONSES=1` is wrapper-internal and is consumed before child tools run.
 
 The committed fixtures are exact but inactive:
 

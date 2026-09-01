@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import draft07MetaSchema from "./draft-07-meta-schema.mjs";
 
@@ -11,9 +12,13 @@ const STRUCTURED_OUTPUT_OPT_IN = "NO_MISTAKES_PI_STRUCTURED_OUTPUT";
 const STRICT_RESPONSES_OPT_IN = "NO_MISTAKES_PI_STRICT_RESPONSES";
 const STRICT_PROVIDER = "no-mistakes-flash-next-responses";
 const STRICT_MODEL = "Qwen/Qwen3.8-Flash-Next-FP8";
+const STRICT_TEMPERATURE = 1;
+const STRICT_TOP_P = 0.95;
+const STRICT_SEED = 424242;
 const MAX_SCHEMA_BYTES = 1024 * 1024;
 const MAX_PROVIDER_REQUESTS = 3;
 const MAX_REPAIR_NUDGES = 2;
+const REPAIRABLE_RAW_STOP_REASON = "completed";
 const REPAIR_NUDGES = Object.freeze({
   missing:
     "FORMAT_REPAIR_REQUIRED: No completed structured_output call was received. Do not repeat analysis. Do not output prose. Call structured_output exactly once with every required field.",
@@ -140,9 +145,16 @@ export default async function structuredOutputExtension(pi, options = {}) {
   if (strictResponses) {
     pi.on("message_end", (event) => strictRepair.observeMessage(event.message));
     pi.on("turn_end", (event) => strictRepair.finishTurn(event));
+    pi.on("tool_call", (event) => strictRepair.guardToolCall(event));
     pi.on("before_provider_request", (event, ctx) => {
-      strictRepair.beginProviderRequest();
-      return enforceStrictResponsesRequest(event.payload, ctx, pi);
+      try {
+        strictRepair.beginProviderRequest();
+        return enforceStrictResponsesRequest(event.payload, ctx, pi, schema);
+      } catch (error) {
+        strictRepair.reject(error);
+        ctx?.abort?.();
+        return event.payload;
+      }
     });
   }
 }
@@ -155,21 +167,48 @@ function createStrictRepairController(pi, schemaValidator) {
   let hardStop;
 
   const stop = (message) => {
-    hardStop ??= new Error(message);
+    hardStop ??= message instanceof Error ? message : new Error(message);
     throw hardStop;
   };
+
+  const blockedTool = () => ({
+    block: true,
+    terminate: true,
+    reason: hardStop?.message ?? "strict no-mistakes gate rejected tool activity",
+  });
+
+  const validRepairTerminal = (message) =>
+    message?.role === "assistant" &&
+    message.rawStopReason === REPAIRABLE_RAW_STOP_REASON &&
+    (message.stopReason === "stop" || message.stopReason === "toolUse") &&
+    !message.errorMessage &&
+    !message.error;
+
+  const providerFailure = (message) =>
+    message?.stopReason === "error" || Boolean(message?.errorMessage) || Boolean(message?.error);
 
   return {
     beginProviderRequest() {
       if (hardStop) throw hardStop;
+      if (providerRequests >= MAX_PROVIDER_REQUESTS) {
+        stop("strict no-mistakes gate exhausted its provider-request cap");
+      }
       providerRequests++;
       turnDefect = undefined;
-      if (providerRequests > MAX_PROVIDER_REQUESTS) {
-        throw new Error("strict no-mistakes gate exhausted its provider-request cap");
-      }
+    },
+    reject(error) {
+      hardStop ??= error instanceof Error ? error : new Error(String(error));
     },
     observeMessage(message) {
+      if (hardStop) return;
       if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
+      if (providerFailure(message)) {
+        hardStop ??= new Error("strict no-mistakes gate received a provider failure");
+        return;
+      }
+      if (!validRepairTerminal(message)) {
+        stop("strict no-mistakes gate reached an invalid terminal transport boundary");
+      }
       const calls = message.content.filter((part) => part?.type === "toolCall");
       if (calls.length > 1) {
         stop("strict no-mistakes gate received multiple final tool calls");
@@ -183,23 +222,35 @@ function createStrictRepairController(pi, schemaValidator) {
     },
     accept(params) {
       if (hardStop) throw hardStop;
-      if (completed) throw new Error("strict no-mistakes gate received multiple completed structured_output calls");
+      if (completed) {
+        hardStop ??= new Error("strict no-mistakes gate received multiple completed structured_output calls");
+        throw hardStop;
+      }
       if (!schemaValidator.Check(params)) {
         turnDefect = "schema";
         throw new Error("structured_output arguments do not validate against the required schema");
       }
       completed = true;
     },
+    guardToolCall(event) {
+      if (hardStop) return blockedTool();
+      if (event?.toolName !== "structured_output") {
+        hardStop = new Error("strict no-mistakes gate received a competing final tool call");
+        return blockedTool();
+      }
+      return undefined;
+    },
     finishTurn(event) {
       if (hardStop) throw hardStop;
-      if (completed) return;
       const message = event?.message;
-      if (message?.role !== "assistant") {
+      if (providerFailure(message)) {
+        hardStop ??= new Error("strict no-mistakes gate received a provider failure");
+        return;
+      }
+      if (!validRepairTerminal(message)) {
         stop("strict no-mistakes gate reached an invalid terminal transport boundary");
       }
-      // Provider, timeout, quota, auth, cancellation, and transport failures are
-      // terminal. Never convert them into a model-format repair request.
-      if (message.stopReason === "error" || message.errorMessage || message.error) return;
+      if (completed) return;
       const defect = turnDefect ?? "missing";
       if (repairNudges >= MAX_REPAIR_NUDGES) {
         throw new Error("strict no-mistakes gate exhausted two same-session format repairs");
@@ -216,7 +267,7 @@ function createStrictRepairController(pi, schemaValidator) {
   };
 }
 
-function enforceStrictResponsesRequest(payload, ctx, pi) {
+function enforceStrictResponsesRequest(payload, ctx, pi, schema) {
   const model = ctx?.model;
   if (model?.provider !== STRICT_PROVIDER || model?.id !== STRICT_MODEL || model?.api !== "openai-responses") {
     throw new Error(
@@ -241,11 +292,15 @@ function enforceStrictResponsesRequest(payload, ctx, pi) {
   }
   const tool = payload.tools[0];
   if (tool?.type !== "function" || tool?.name !== "structured_output" || tool?.strict !== true ||
-      tool?.parameters === null || typeof tool?.parameters !== "object") {
+      tool?.parameters === null || typeof tool?.parameters !== "object" ||
+      !isDeepStrictEqual(tool.parameters, schema)) {
     throw new Error("strict no-mistakes gate requires a strict structured_output function");
   }
   if (payload.reasoning?.effort !== "xhigh") {
     throw new Error("strict no-mistakes gate payload lost xhigh reasoning");
+  }
+  if (payload.temperature !== STRICT_TEMPERATURE || payload.top_p !== STRICT_TOP_P || payload.seed !== STRICT_SEED) {
+    throw new Error("strict no-mistakes gate payload lost pinned sampling parameters");
   }
 
   const result = {
@@ -266,8 +321,12 @@ export {
   MAX_REPAIR_NUDGES,
   MAX_SCHEMA_BYTES,
   REPAIR_NUDGES,
+  REPAIRABLE_RAW_STOP_REASON,
+  STRICT_SEED,
   STRICT_MODEL,
   STRICT_PROVIDER,
+  STRICT_TEMPERATURE,
+  STRICT_TOP_P,
   acceptedGateSchema,
   createStrictRepairController,
   enforceStrictResponsesRequest,
