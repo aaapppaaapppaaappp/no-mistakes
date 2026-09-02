@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	toon "github.com/toon-format/toon-go"
 
@@ -213,13 +215,46 @@ func preflightGuard(ctx context.Context, env *axiEnv, branch string) func(*cobra
 		}
 	}
 	if dirty {
+		help := []string{
+			"Commit the files that belong to this change (`git add <path> && git commit`), or gitignore / add the rest to `.git/info/exclude`",
+			"Run `git status` to see what is uncommitted",
+		}
+		if untracked, err := git.UntrackedFiles(ctx, "."); err == nil && len(untracked) > 0 {
+			help = append([]string{untrackedHint(untracked)}, help...)
+		}
 		return func(cmd *cobra.Command) error {
-			return emitError(cmd, 1, "uncommitted changes in the working tree",
-				"Commit your work before validating: `git add -A && git commit -m \"...\"`, then re-run",
-				"Run `git status` to see what is uncommitted")
+			return emitError(cmd, 1, "uncommitted changes in the working tree", help...)
 		}
 	}
 	return nil
+}
+
+// untrackedHint renders the untracked paths named in the dirty-worktree error,
+// bounded so a large untracked tree cannot bloat the error document. Paths stay
+// in git's order and the hint states how many were left out.
+func untrackedHint(untracked []string) string {
+	const maxUntrackedPaths = 5
+	const sep = ", "
+	shown := untracked
+	if len(shown) > maxUntrackedPaths {
+		shown = shown[:maxUntrackedPaths]
+	}
+	renderedPaths := make([]string, len(shown))
+	for i, path := range shown {
+		renderedPaths[i] = displayUntrackedPath(path)
+	}
+	rendered := strings.Join(renderedPaths, sep)
+	if dropped := len(untracked) - len(shown); dropped > 0 {
+		rendered += fmt.Sprintf("%s(+%d more)", sep, dropped)
+	}
+	return fmt.Sprintf("Untracked files (not in git yet): %s", rendered)
+}
+
+func displayUntrackedPath(path string) string {
+	if strings.TrimSpace(path) != path || strings.IndexFunc(path, func(r rune) bool { return !unicode.IsGraphic(r) }) >= 0 {
+		return strconv.QuoteToGraphic(path)
+	}
+	return path
 }
 
 // branchOwnershipError carries the shared branch-sync classification that
