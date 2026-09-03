@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -136,6 +137,80 @@ func evaluateRequiredWorkflowAuthorCondition(condition, author string) (bool, er
 		}
 	}
 	return true, nil
+}
+
+// upstreamSyncBranch is this fork's upstream-synchronization branch: the head
+// branch of the pull request that merges upstream main into the fork. A sync PR
+// is deliberately not pipeline-authored (the pipeline reviews code written on
+// this fork, not a merge of upstream's own commits), so this single exact branch
+// name is the one pattern both repository guards exempt. It is declared once
+// here and asserted by both guard test files, so the two guards cannot drift
+// onto different patterns.
+const upstreamSyncBranch = "fm/no-mistakes-upstream-sync"
+
+// TestNoMistakesRequiredWorkflowExemptsUpstreamSyncHeadBranch covers both
+// directions of the upstream-sync exemption at the caller, executing the real
+// verify.py through the same harness as the wiring tests above:
+//
+//   - a sync-shaped PR - the upstream-sync head branch with a body that carries
+//     no signature line and no attestation at all - passes, and its log says
+//     plainly which exemption fired and why;
+//   - every other head branch, including one merely named like the sync branch,
+//     still fails for exactly the reason it fails today.
+//
+// The mechanism is the action's existing `exempt-head-branches` input, set here
+// rather than inside the action so it stays this repository's own policy. The
+// pattern is read out of the workflow, so this test cannot pass on a value the
+// workflow never actually forwards.
+func TestNoMistakesRequiredWorkflowExemptsUpstreamSyncHeadBranch(t *testing.T) {
+	workflow := loadRequiredWorkflow(t)
+	// What an upstream-sync PR body really carries: merge prose, upstream's
+	// generated files mentioned in text, no pipeline section. Any other branch
+	// with this body fails the gate.
+	syncBody := "Merge upstream main (e8d4fc2) into fork main.\n\n"
+	syncBody += "Carries upstream's CHANGELOG.md and .release-please-manifest.json.\n"
+
+	if got := requiredWorkflowCheckStep(t, workflow).With["exempt-head-branches"]; got != upstreamSyncBranch {
+		t.Fatalf("check step exempt-head-branches = %q, want the exact sync branch %q", got, upstreamSyncBranch)
+	}
+
+	t.Run("upstream sync head branch passes and says why", func(t *testing.T) {
+		conclusion, output := runRequiredWorkflowCheckJob(t, workflow, requiredWorkflowEvent{
+			Action: "opened", Body: syncBody, HeadRef: upstreamSyncBranch, PRNumber: 6,
+		})
+		if conclusion != "success" {
+			t.Fatalf("conclusion = %q, want success for the exempt sync branch\n%s", conclusion, output)
+		}
+		// The guard's own exemption reason, surfaced in the required check's log.
+		for _, want := range []string{
+			"Skipping no-mistakes enforcement",
+			"head branch " + upstreamSyncBranch + " matches exempt pattern " + upstreamSyncBranch,
+		} {
+			if !strings.Contains(output, want) {
+				t.Errorf("output does not state %q:\n%s", want, output)
+			}
+		}
+	})
+
+	for _, tc := range []struct{ name, headRef string }{
+		{name: "ordinary feature branch", headRef: "feature/fork-only-change"},
+		{name: "branch named like the sync branch", headRef: upstreamSyncBranch + "-trial"},
+		{name: "sync branch under another prefix", headRef: "dependabot/" + upstreamSyncBranch},
+	} {
+		t.Run("other head branch still fails: "+tc.name, func(t *testing.T) {
+			conclusion, output := runRequiredWorkflowCheckJob(t, workflow, requiredWorkflowEvent{
+				Action: "opened", Body: syncBody, HeadRef: tc.headRef, PRNumber: 7,
+			})
+			if conclusion != "failure" {
+				t.Fatalf("conclusion = %q, want failure for head branch %q; the exemption must match %q exactly\n%s", conclusion, tc.headRef, upstreamSyncBranch, output)
+			}
+			for _, want := range []string{"This PR was not raised through no-mistakes.", "git push no-mistakes"} {
+				if !strings.Contains(output, want) {
+					t.Errorf("output no longer reports %q for head branch %q:\n%s", want, tc.headRef, output)
+				}
+			}
+		})
+	}
 }
 
 // TestNoMistakesRequiredWorkflowTriggersOnRelevantPREvents ensures the check
@@ -491,6 +566,20 @@ func runRequiredWorkflowCheckJob(t *testing.T, workflow requiredWorkflow, event 
 		t.Fatalf("write event payload: %v", err)
 	}
 
+	// This workflow forwards no explicit pr-body/pr-head-sha (the ordinary
+	// pull_request-triggered caller, see the workflow's own comment on
+	// PR_BODY/PR_HEAD_SHA), so verify.py now requires the live lookup to
+	// reach any verdict at all - a lookup failure fails the whole gate closed
+	// rather than falling back to the event payload (the fix this test suite
+	// exercises for the wiring surface; the verdict surface itself is owned
+	// by require_no_mistakes_action_test.go). Stub the live API to echo back
+	// this same event's body/head, so these wiring tests keep exercising the
+	// identical verdict logic they always have, just reached via the live
+	// path instead of the archived one - matching what a real runner with
+	// this workflow's `permissions: pull-requests: read` actually does.
+	requiredWorkflowTestRepo := "kunchenguid/no-mistakes"
+	liveServer := stubPullsAPI(t, requiredWorkflowTestRepo, strconv.FormatInt(prNumber, 10), http.StatusOK, event.Body, headSHA)
+
 	action := loadRequireAction(t, actionPath)
 	if action.Runs.Using != "composite" {
 		t.Fatalf("action runs.using = %q, want composite", action.Runs.Using)
@@ -544,11 +633,22 @@ func runRequiredWorkflowCheckJob(t *testing.T, workflow requiredWorkflow, event 
 	}
 
 	cmd := exec.Command(bash, "-c", compositeStep.Run)
-	cmd.Env = append(os.Environ(), env...)
+	// The composite action's own env mapping resolves an unset github-token
+	// `with:` to its action.yml default, the literal unresolved expression
+	// text "${{ github.token }}" - this offline harness has no Actions
+	// runner to evaluate that against, so it is never a usable token. Strip
+	// it (and any ambient GITHUB_API_URL/GITHUB_REPOSITORY this test binary
+	// happens to inherit) and set the three deterministically to the stub
+	// server above instead, exactly as runRequireAction does for the same
+	// reason.
+	cmd.Env = append(filterEnv(os.Environ(), "GITHUB_TOKEN", "GITHUB_API_URL", "GITHUB_REPOSITORY"), env...)
 	cmd.Env = append(cmd.Env,
 		"GITHUB_ACTION_PATH="+actionDir,
 		"GITHUB_EVENT_PATH="+eventPath,
 		"GITHUB_OUTPUT="+outputPath,
+		"GITHUB_TOKEN=test-token",
+		"GITHUB_API_URL="+liveServer.URL,
+		"GITHUB_REPOSITORY="+requiredWorkflowTestRepo,
 	)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
