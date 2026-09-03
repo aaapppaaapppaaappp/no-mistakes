@@ -473,6 +473,108 @@ func TestReviewStep_DurableFixAdequacyContract(t *testing.T) {
 	}
 }
 
+// The qualitative corpus is an executable unified-diff contract, so each
+// fixture must remain consumable by the documented git-based evaluation flow.
+func TestReviewStep_IntendedUsageFixturesApply(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		file     string
+		baseline string
+	}{
+		{name: "rare duplicate window", file: "jobs/finish.go", baseline: "package jobs\n"},
+		{name: "hypothetical unused lock", file: "run/status.go", baseline: "package run\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, tc.file)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.baseline), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "init", "-q")
+			// Keep both inputs LF-only regardless of the runner's checkout
+			// conversion policy. Git parses context lines from the patch as-is.
+			gitCmd(t, dir, "config", "core.autocrlf", "false")
+			fixture, err := os.ReadFile(filepath.Join("testdata", "intended_usage_review", strings.ReplaceAll(tc.name, " ", "-")+".diff"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixturePath := filepath.Join(dir, "fixture.diff")
+			fixture = []byte(strings.ReplaceAll(string(fixture), "\r\n", "\n"))
+			if err := os.WriteFile(fixturePath, fixture, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "apply", "--check", fixturePath)
+		})
+	}
+}
+
+// Intended-usage evidence is a finding threshold, not a general "be less
+// noisy" rewrite: a rare but real sequence under intended usage still
+// qualifies, while a hypothetical unused path does not. The completeness
+// obligations stay; this pins the emitted contract, not model interpretation.
+func TestReviewStep_IntendedUsageEvidenceContract(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: findingsJSON}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(ag.calls))
+	}
+	prompt := ag.calls[0].Prompt
+
+	for _, want := range []string{
+		"Report a finding only when you can construct a concrete sequence that occurs during the change's intended usage",
+		"including rare but real sequences those callers actually perform",
+		"hypothetical unused execution that intended callers, the public API, or documented usage never take",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("review prompt missing intended-usage evidence threshold %q:\n%s", want, prompt)
+		}
+	}
+
+	// Completeness stays: this is not a license to stop early or emit fewer findings.
+	for _, want := range []string{
+		"Do a full review pass before returning",
+		"Do not stop after the first valid finding",
+		"Continue inspecting the rest of the changed code",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("review prompt dropped completeness obligation %q:\n%s", want, prompt)
+		}
+	}
+
+	for _, overreach := range []string{
+		"be less noisy",
+		"prefer fewer findings",
+		"reduce the number of findings",
+		"lock on every status write",
+		"parent-channel",
+		"parent channel",
+	} {
+		if strings.Contains(strings.ToLower(prompt), overreach) {
+			t.Errorf("review prompt broadened past the intended-usage criterion with %q:\n%s", overreach, prompt)
+		}
+	}
+}
+
 // Counterexample construction is a general review principle for any new or
 // changed logic, not a bug-fix-only reconstruction. Silently wrong values,
 // labels, and sets are named as risks. The principle stays short and general:
