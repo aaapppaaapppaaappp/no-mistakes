@@ -1,0 +1,6 @@
+agent: acp:pi-flash-next-responses-gate
+agent_config:
+  acp:pi-flash-next-responses-gate:
+    model: no-mistakes-flash-next-responses/Qwen/Qwen3.8-Flash-Next-FP8
+acp_registry_overrides:
+  pi-flash-next-responses-gate: env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/absolute/path/to/no-mistakes/integrations/pi/bin/pi-no-mistakes-flash-next-responses-acp /absolute/path/to/no-mistakes/integrations/pi/node_modules/.bin/pi-acp
