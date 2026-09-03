@@ -139,6 +139,80 @@ func evaluateRequiredWorkflowAuthorCondition(condition, author string) (bool, er
 	return true, nil
 }
 
+// upstreamSyncBranch is this fork's upstream-synchronization branch: the head
+// branch of the pull request that merges upstream main into the fork. A sync PR
+// is deliberately not pipeline-authored (the pipeline reviews code written on
+// this fork, not a merge of upstream's own commits), so this single exact branch
+// name is the one pattern both repository guards exempt. It is declared once
+// here and asserted by both guard test files, so the two guards cannot drift
+// onto different patterns.
+const upstreamSyncBranch = "fm/no-mistakes-upstream-sync"
+
+// TestNoMistakesRequiredWorkflowExemptsUpstreamSyncHeadBranch covers both
+// directions of the upstream-sync exemption at the caller, executing the real
+// verify.py through the same harness as the wiring tests above:
+//
+//   - a sync-shaped PR - the upstream-sync head branch with a body that carries
+//     no signature line and no attestation at all - passes, and its log says
+//     plainly which exemption fired and why;
+//   - every other head branch, including one merely named like the sync branch,
+//     still fails for exactly the reason it fails today.
+//
+// The mechanism is the action's existing `exempt-head-branches` input, set here
+// rather than inside the action so it stays this repository's own policy. The
+// pattern is read out of the workflow, so this test cannot pass on a value the
+// workflow never actually forwards.
+func TestNoMistakesRequiredWorkflowExemptsUpstreamSyncHeadBranch(t *testing.T) {
+	workflow := loadRequiredWorkflow(t)
+	// What an upstream-sync PR body really carries: merge prose, upstream's
+	// generated files mentioned in text, no pipeline section. Any other branch
+	// with this body fails the gate.
+	syncBody := "Merge upstream main (e8d4fc2) into fork main.\n\n"
+	syncBody += "Carries upstream's CHANGELOG.md and .release-please-manifest.json.\n"
+
+	if got := requiredWorkflowCheckStep(t, workflow).With["exempt-head-branches"]; got != upstreamSyncBranch {
+		t.Fatalf("check step exempt-head-branches = %q, want the exact sync branch %q", got, upstreamSyncBranch)
+	}
+
+	t.Run("upstream sync head branch passes and says why", func(t *testing.T) {
+		conclusion, output := runRequiredWorkflowCheckJob(t, workflow, requiredWorkflowEvent{
+			Action: "opened", Body: syncBody, HeadRef: upstreamSyncBranch, PRNumber: 6,
+		})
+		if conclusion != "success" {
+			t.Fatalf("conclusion = %q, want success for the exempt sync branch\n%s", conclusion, output)
+		}
+		// The guard's own exemption reason, surfaced in the required check's log.
+		for _, want := range []string{
+			"Skipping no-mistakes enforcement",
+			"head branch " + upstreamSyncBranch + " matches exempt pattern " + upstreamSyncBranch,
+		} {
+			if !strings.Contains(output, want) {
+				t.Errorf("output does not state %q:\n%s", want, output)
+			}
+		}
+	})
+
+	for _, tc := range []struct{ name, headRef string }{
+		{name: "ordinary feature branch", headRef: "feature/fork-only-change"},
+		{name: "branch named like the sync branch", headRef: upstreamSyncBranch + "-trial"},
+		{name: "sync branch under another prefix", headRef: "dependabot/" + upstreamSyncBranch},
+	} {
+		t.Run("other head branch still fails: "+tc.name, func(t *testing.T) {
+			conclusion, output := runRequiredWorkflowCheckJob(t, workflow, requiredWorkflowEvent{
+				Action: "opened", Body: syncBody, HeadRef: tc.headRef, PRNumber: 7,
+			})
+			if conclusion != "failure" {
+				t.Fatalf("conclusion = %q, want failure for head branch %q; the exemption must match %q exactly\n%s", conclusion, tc.headRef, upstreamSyncBranch, output)
+			}
+			for _, want := range []string{"This PR was not raised through no-mistakes.", "git push no-mistakes"} {
+				if !strings.Contains(output, want) {
+					t.Errorf("output no longer reports %q for head branch %q:\n%s", want, tc.headRef, output)
+				}
+			}
+		})
+	}
+}
+
 // TestNoMistakesRequiredWorkflowTriggersOnRelevantPREvents ensures the check
 // re-runs when the PR body is edited so a contributor cannot bypass by opening
 // clean then editing the body.

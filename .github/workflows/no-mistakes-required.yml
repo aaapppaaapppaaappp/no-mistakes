@@ -66,3 +66,19 @@ jobs:
       # itself through the required check.
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        with:
+          # Upstream synchronization only. This fork periodically merges upstream
+          # main into `fm/no-mistakes-upstream-sync`, and a sync PR is deliberately
+          # not pipeline-authored: the pipeline reviews code written on this fork,
+          # not a merge of upstream's own commits, so there is no run to attest.
+          # This is the action's existing `exempt-head-branches` input (fnmatch
+          # glob, used here with no wildcards = exact branch name), not a new
+          # mechanism, and the pinned copy above already implements it, so no pin
+          # bump is needed. The exempt PR reports exempt=true plus an
+          # exempt-reason in the check log and keeps compliant=false, because a
+          # bypass is not validation. Exact rather than a glob like
+          # `*upstream-sync` on purpose: a wildcard would let any contributor name
+          # their way out of the gate. Every other head branch is judged exactly as
+          # before, and the check name is unchanged. This branch is exempt from
+          # only this check and `Generated files must not be hand-edited`.
+          exempt-head-branches: fm/no-mistakes-upstream-sync

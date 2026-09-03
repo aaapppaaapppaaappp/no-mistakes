@@ -112,6 +112,36 @@ workflow. It does not claim that no-mistakes ran: exempt PRs report
 `compliant=false` and `exempt=true`. This is separate from the invariant that no
 standing configuration may skip a step inside a no-mistakes run.
 
+### Upstream-sync exemption configured in this repository
+
+This repository's own callers configure exactly one head-branch exemption: the
+exact branch name `fm/no-mistakes-upstream-sync`. It exists for upstream
+synchronization. The fork merges upstream `main` into that branch periodically,
+and a sync pull request is deliberately not raised through `git push
+no-mistakes`: the pipeline reviews code written on this fork, not a merge of
+upstream's own commits, so there is no run to attest.
+
+The pattern exempts that branch from exactly these two checks and nothing else:
+
+- **`PR must be raised via no-mistakes`** - through this action's existing
+  `exempt-head-branches` input in
+  [`.github/workflows/no-mistakes-required.yml`](../../../workflows/no-mistakes-required.yml).
+  The check succeeds with `exempt=true` and an `exempt-reason` naming the
+  pattern, and keeps `compliant=false`.
+- **`Generated files must not be hand-edited`** - through a term on that guard's
+  existing job condition in
+  [`.github/workflows/guard-generated-files.yml`](../../../workflows/guard-generated-files.yml),
+  because merging upstream legitimately carries upstream's own generated
+  `CHANGELOG.md` and `.release-please-manifest.json`. Nobody hand-edited them,
+  and the guard's three-dot diff cannot tell the two cases apart.
+
+The value is an exact branch name, not a glob: a wildcard such as
+`*upstream-sync` would let any contributor name their way out of both gates.
+Every other head branch is judged exactly as before the exemption existed, and an
+exempt sync pull request still has to pass every other check. Pinned by
+`TestNoMistakesRequiredWorkflowExemptsUpstreamSyncHeadBranch` and
+`TestGuardGeneratedFilesWorkflowExemptsUpstreamSyncBranch`.
+
 ### Non-goal: a contributor guardrail, not a forgery-proof boundary
 
 This gate is a **contributor guardrail**. It is explicitly **not** a
