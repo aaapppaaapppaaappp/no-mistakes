@@ -25,9 +25,19 @@ jobs:
     runs-on: ubuntu-latest
     # release-please owns CHANGELOG.md and .release-please-manifest.json; its PR
     # is the one legitimate place those files change, so we exempt its author.
+    #
+    # The head-ref term exempts this fork's upstream-sync branch only: a PR that
+    # merges upstream main into `fm/no-mistakes-upstream-sync` legitimately carries
+    # upstream's own generated CHANGELOG.md and manifest, which nobody hand-edited,
+    # while the three-dot base...head diff below still lists them as PR changes.
+    # Exact branch name rather than a glob, so no contributor can name their way
+    # out, and it is the same pattern as the `exempt-head-branches` input in
+    # .github/workflows/no-mistakes-required.yml. Together those two checks are the
+    # ONLY thing this branch is exempt from; every other PR is judged as before.
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&
-      github.event.pull_request.user.login != 'release-please[bot]'
+      github.event.pull_request.user.login != 'release-please[bot]' &&
+      github.event.pull_request.head.ref != 'fm/no-mistakes-upstream-sync'
     steps:
       - uses: actions/checkout@v6
         with:
