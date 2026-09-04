@@ -13,7 +13,7 @@ The daemon also reads `document.instructions`, `review.path_instructions`, `disa
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`) are still read from the pushed branch, except `test.evidence.branch`, which names a git ref the daemon pushes to.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, and `providers`) are still read from the pushed branch, except `test.evidence.branch`, which names a git ref the daemon pushes to.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -91,6 +91,16 @@ test:
     attach_media: true
     dir: .no-mistakes/evidence
     branch: no-mistakes/evidence
+
+providers:
+  github:
+    draft_pull_requests: false
+  gitlab:
+    draft_pull_requests: false
+  bitbucket:
+    draft_pull_requests: false
+  azuredevops:
+    draft_pull_requests: false
 ```
 
 ## Fields
@@ -519,3 +529,39 @@ On GitHub.com/GHEC, supported image and video artifacts are uploaded to GitHub u
 For GitHub repositories, set `store_in_repo: true` to also publish it to an orphan evidence branch in the code branch's push-target repository and link the artifacts from the PR body; evidence is never committed to the pushed branch, so it never reaches the default branch.
 `test.evidence.branch` is read ONLY from the trusted default-branch copy of this file, because it names a git ref the daemon pushes to; a pushed branch cannot redirect evidence commits.
 See [global config](/no-mistakes/reference/global-config/#testevidence) for provider support, limits, validation, and fail-closed behavior.
+
+### providers.github.draft_pull_requests
+
+Override the [global GitHub draft setting](/no-mistakes/reference/global-config/#providersgithubdraft_pull_requests) for this repo.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | Inherits from global (default `false`) |
+
+### providers.gitlab.draft_pull_requests
+
+Override the [global GitLab draft setting](/no-mistakes/reference/global-config/#providersgitlabdraft_pull_requests) for this repo.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | Inherits from global (default `false`) |
+
+### providers.bitbucket.draft_pull_requests
+
+Override the [global Bitbucket draft setting](/no-mistakes/reference/global-config/#providersbitbucketdraft_pull_requests) for this repo.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | Inherits from global (default `false`) |
+
+### providers.azuredevops.draft_pull_requests
+
+Override the [global Azure DevOps draft setting](/no-mistakes/reference/global-config/#providersazuredevopsdraft_pull_requests) for this repo.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | Inherits from global (default `false`) |
