@@ -604,6 +604,44 @@ func TestBoundArchiveOffersOnlyKeepLocalRecoveryForDivergentLaterHead(t *testing
 	}
 }
 
+func TestBoundArchiveContainingLocalWorkStillRequiresKeepLocal(t *testing.T) {
+	t.Parallel()
+
+	fixture := newRebasedRecoverFixture(t, types.RunCancelled)
+	archiveRef := "refs/heads/archive/rebased-" + fixture.run.ID
+	mustRun(t, fixture.gate, "update-ref", fixture.anchorRef(), fixture.preserved)
+	mustRun(t, fixture.local, "fetch", "--no-tags", fixture.gate, fixture.anchorRef()+":"+archiveRef)
+	if _, err := fixture.db.RecordRecoveryArchive(db.RecoveryArchive{
+		OwnerRunID: fixture.run.ID, RepoID: fixture.repo.ID, RunID: fixture.run.ID, Branch: fixture.run.Branch,
+		RequiredHeadSHA: fixture.submitted, PreservedHeadSHA: fixture.preserved, ArchiveRef: archiveRef,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !preservedContainsLocalWork(fixture.ctx, fixture.gate, fixture.submitted, fixture.preserved) {
+		t.Fatal("rebased preserved head must contain the local work")
+	}
+	beforeLocalRefs := mustRun(t, fixture.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	beforeGateRefs := mustRun(t, fixture.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	state := fixture.service.InspectCached(fixture.ctx)
+	if state.Recovery == nil || !state.Recovery.KeepLocal || state.NextAction == nil || state.NextAction.Command != "no-mistakes axi sync --recover --keep-local" {
+		t.Fatalf("archive-backed state = %#v", state)
+	}
+	refused := fixture.service.Recover(fixture.ctx, false)
+	if refused.Recovered || refused.Changed || refused.Safety != "blocked_recover_archive_requires_keep_local" || fixture.custodyReturned() {
+		t.Fatalf("plain recovery = %#v", refused)
+	}
+	if mustRun(t, fixture.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)") != beforeLocalRefs || mustRun(t, fixture.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)") != beforeGateRefs {
+		t.Fatal("plain recovery changed refs")
+	}
+	recovered := fixture.service.Recover(fixture.ctx, true)
+	if !recovered.Recovered || recovered.Changed || !fixture.custodyReturned() {
+		t.Fatalf("keep-local recovery = %#v", recovered)
+	}
+	if mustRun(t, fixture.local, "rev-parse", "HEAD") != fixture.submitted || mustRun(t, fixture.local, "rev-parse", archiveRef) != fixture.preserved {
+		t.Fatal("keep-local recovery changed required or archived history")
+	}
+}
+
 func TestBoundArchiveMovedAtRecoveryBoundaryRefusesWithoutRecoveryMutation(t *testing.T) {
 	t.Parallel()
 

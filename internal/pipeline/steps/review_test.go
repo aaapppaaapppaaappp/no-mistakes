@@ -66,6 +66,26 @@ func TestReviewStep_UnrunAnalyzerDoesNotApprove(t *testing.T) {
 			want:   "review analyzer finding 0 missing severity",
 		},
 		{
+			name:   "missing finding description and action",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"info"}],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
+			want:   "review analyzer finding 0 missing description",
+		},
+		{
+			name:   "blank finding description",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"info","description":" \t","action":"no-op"}],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
+			want:   "review analyzer finding 0 missing description",
+		},
+		{
+			name:   "missing finding action",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"info","description":"observation"}],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
+			want:   "review analyzer finding 0 missing action",
+		},
+		{
+			name:   "unknown finding action",
+			result: &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"info","description":"observation","action":"ignore"}],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
+			want:   "review analyzer finding 0 missing action",
+		},
+		{
 			name:   "invalid risk level",
 			result: &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"critical","risk_rationale":"clean","risk_scope":"source-or-external"}`)},
 			want:   "review analyzer findings invalid risk level",

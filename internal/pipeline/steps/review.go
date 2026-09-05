@@ -397,6 +397,14 @@ Risk assessment (after listing all findings):
 			return nil, fmt.Errorf("review analyzer finding %d missing severity", i)
 		}
 		findings.Items[i].Severity = types.NormalizeFindingSeverity(findings.Items[i].Severity)
+		if strings.TrimSpace(findings.Items[i].Description) == "" {
+			return nil, fmt.Errorf("review analyzer finding %d missing description", i)
+		}
+		switch findings.Items[i].Action {
+		case types.ActionNoOp, types.ActionAutoFix, types.ActionAskUser:
+		default:
+			return nil, fmt.Errorf("review analyzer finding %d missing action", i)
+		}
 	}
 
 	// Phase ownership boundary: drop findings that only claim later pipeline-

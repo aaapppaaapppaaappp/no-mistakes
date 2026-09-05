@@ -1954,14 +1954,14 @@ func (s *Service) recoverySourceAvailable(ctx context.Context, state *State, run
 	if !ordinaryAvailable && gateAvailable && objectExists(ctx, gateDir, preserved) && state.Local.Clean && objectExists(ctx, gateDir, local) {
 		ordinaryAvailable = isAncestor(ctx, gateDir, local, preserved) || preservedContainsLocalWork(ctx, gateDir, local, preserved)
 	}
+	if archiveProof.available {
+		return archiveProof
+	}
 	if ordinaryAvailable {
 		return recoverySourceProof{
 			available: true,
 			action:    NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover"},
 		}
-	}
-	if archiveProof.available {
-		return archiveProof
 	}
 	return unavailableRecoverySource(
 		"blocked_recover_manual_reconciliation",
