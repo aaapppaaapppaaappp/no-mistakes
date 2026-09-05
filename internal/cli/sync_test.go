@@ -1268,6 +1268,8 @@ func TestAxiArchiveBackedRecoveryKeepsExactRequiredHeadAndBothHistories(t *testi
 			t.Fatalf("independent pre-recovery gate head = %s, want %s", got, gateBefore)
 		}
 	}
+	t.Logf("Initial status:\n%s\nBound archive:\n%s\nMoved archive refusal:\n%s\nPlain recovery refusal:\n%s\nKeep-local recovery:\n%s", status, bound, movedRecovery, refused, recovered)
+	t.Logf("Persisted Git state after recovery:\n%s", cliRecoveryGitSnapshot(t, f))
 }
 
 func TestAxiBindRecoveryArchiveRejectsTagsAndRemoteTrackingRefs(t *testing.T) {

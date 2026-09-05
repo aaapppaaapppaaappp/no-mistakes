@@ -303,6 +303,7 @@ func TestArchiveRecoveryConfirmationUsesOnlyGuardedKeepLocalAction(t *testing.T)
 	if !called || !m.branchSync.Recovered || m.branchSync.Changed {
 		t.Fatalf("archive recovery result = %#v", m.branchSync)
 	}
+	t.Logf("Rendered archive status:\n%s\nRendered archive confirmation:\n%s", view, confirmation)
 }
 
 // TestActivePipelineOwnedStateOffersNoRecoveryAction pins that the recovery
