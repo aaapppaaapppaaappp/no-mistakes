@@ -1,0 +1,42 @@
+{
+  "providers": {
+    "no-mistakes-flash-next-responses": {
+      "baseUrl": "http://127.0.0.1:18000/v1",
+      "apiKey": "local-qwen-gate",
+      "api": "openai-responses",
+      "compat": {
+        "supportsStrictMode": true
+      },
+      "models": [
+        {
+          "id": "Qwen/Qwen3.8-Flash-Next-FP8",
+          "name": "Flash-Next FP8 (strict no-mistakes Responses gate)",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": null,
+            "xhigh": "xhigh",
+            "max": null
+          },
+          "input": ["text"],
+          "contextWindow": 262144,
+          "maxTokens": 4096,
+          "samplingParams": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "seed": 424242
+          },
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        }
+      ]
+    }
+  }
+}

@@ -36,6 +36,9 @@ fi
 if [ -n "$NM_TEST_ACPX_SCHEMA_COPY" ] && [ -n "$NO_MISTAKES_JSON_SCHEMA_FILE" ]; then
   cat "$NO_MISTAKES_JSON_SCHEMA_FILE" > "$NM_TEST_ACPX_SCHEMA_COPY"
 fi
+if [ -n "$NO_MISTAKES_PI_STRICT_PROOF_FILE" ] && [ -n "$NO_MISTAKES_PI_STRICT_PROOF_TOKEN" ]; then
+  printf '%s\n' "$NO_MISTAKES_PI_STRICT_PROOF_TOKEN" >> "$NO_MISTAKES_PI_STRICT_PROOF_FILE"
+fi
 if [ -n "$NM_TEST_ACPX_EVENT" ]; then
   printf '%s\n' "$NM_TEST_ACPX_EVENT"
 elif [ -n "$NO_MISTAKES_JSON_SCHEMA_FILE" ]; then
@@ -108,6 +111,229 @@ func TestAcpxAgent_Run_TransportsExactSchemaAndCleansUp(t *testing.T) {
 	}
 	if strings.Contains(string(argvData), envLines[1]) {
 		t.Errorf("schema transport path leaked into child arguments: %s", argvData)
+	}
+}
+
+func TestAcpxAgent_StrictToolResultStillRequiresFinalSchemaValidation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NM_TEST_ACPX_ARGS_FILE", filepath.Join(dir, "args"))
+	t.Setenv("NM_TEST_ACPX_EVENT", `{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}
+{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":17}"}}]}}}`)
+	a := &acpxAgent{
+		bin:        writeStubAcpx(t, dir),
+		target:     acpxStrictResponsesTarget,
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp",
+	}
+	_, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "test",
+		CWD:        dir,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "output parse") {
+		t.Fatalf("Run error = %v, want authoritative final schema rejection", err)
+	}
+}
+
+func TestAcpxAgent_StructuredOutputProseEmitsBoundedWarning(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NM_TEST_ACPX_ARGS_FILE", filepath.Join(dir, "args"))
+	t.Setenv("NM_TEST_ACPX_EVENT", `{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"contradictory prose must not win"}}}
+{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}
+{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"authoritative\"}"}}]}}}`)
+	a := &acpxAgent{
+		bin:        writeStubAcpx(t, dir),
+		target:     acpxStrictResponsesTarget,
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp",
+	}
+	var warnings []LifecycleEvent
+	var chunks []string
+	res, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "test",
+		CWD:        dir,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}`),
+		OnChunk:    func(text string) { chunks = append(chunks, text) },
+		OnLifecycle: func(event LifecycleEvent) {
+			if event.Phase == LifecyclePhaseWarning {
+				warnings = append(warnings, event)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Text != `{"summary":"authoritative"}` || len(chunks) != 0 {
+		t.Fatalf("result = %q, chunks = %v; prose influenced or escaped the authoritative result", res.Text, chunks)
+	}
+	if len(warnings) != 1 || warnings[0].Message != "warning: ACP exact-output turn emitted assistant prose; ignored in favor of the native structured_output arguments" {
+		t.Fatalf("warnings = %#v, want one bounded prose-presence warning", warnings)
+	}
+}
+
+func TestAcpxAgent_StructuredOutputProseWarningSurvivesProtocolFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NM_TEST_ACPX_ARGS_FILE", filepath.Join(dir, "args"))
+	t.Setenv("NM_TEST_ACPX_EVENT", `{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"discarded prose"}}}`+"\nnot-json")
+	a := &acpxAgent{
+		bin:        writeStubAcpx(t, dir),
+		target:     acpxStrictResponsesTarget,
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp",
+	}
+	var warnings []LifecycleEvent
+	_, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "test",
+		CWD:        dir,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}`),
+		OnLifecycle: func(event LifecycleEvent) {
+			if event.Phase == LifecyclePhaseWarning {
+				warnings = append(warnings, event)
+			}
+		},
+	})
+	if err == nil {
+		t.Fatal("Run succeeded, want protocol failure")
+	}
+	if len(warnings) != 1 || warnings[0].Message != "warning: ACP exact-output turn emitted assistant prose; ignored in favor of the native structured_output arguments" {
+		t.Fatalf("warnings = %#v, want one bounded prose-presence warning on failure", warnings)
+	}
+}
+
+func TestAcpxAgent_SingleAttemptDisablesEveryAcpxRetry(t *testing.T) {
+	dir := t.TempDir()
+	countFile := filepath.Join(dir, "count")
+	argsFile := filepath.Join(dir, "args")
+	stub := filepath.Join(dir, "acpx")
+	script := `#!/bin/sh
+printf x >> "$NM_TEST_ATTEMPT_COUNT"
+printf '%s\n' "$@" > "$NM_TEST_ACPX_ARGS_FILE"
+cat >/dev/null
+printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}'
+printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"unused\"}"}}]}}}'
+printf 'provider returned HTTP 503\n' >&2
+exit 1
+`
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NM_TEST_ATTEMPT_COUNT", countFile)
+	t.Setenv("NM_TEST_ACPX_ARGS_FILE", argsFile)
+
+	a := &acpxAgent{
+		bin:        stub,
+		target:     acpxStrictResponsesTarget,
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp",
+	}
+	attempts := 0
+	_, err := a.Run(context.Background(), RunOpts{
+		Prompt: "test",
+		CWD:    dir,
+		JSONSchema: json.RawMessage(
+			`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}`,
+		),
+		OnAttempt: func(Attempt) {
+			attempts++
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("Run error = %v, want first transient failure", err)
+	}
+	count, readErr := os.ReadFile(countFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(count) != "x" || attempts != 1 {
+		t.Fatalf("process count = %q, structured attempts = %d; want exactly one", count, attempts)
+	}
+	args, readErr := os.ReadFile(argsFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(args), "--prompt-retries\n0\n") {
+		t.Fatalf("acpx args do not explicitly disable prompt retries: %s", args)
+	}
+}
+
+func TestAcpxAgent_SingleAttemptControlRefusesInvalidOrUntrustedValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "zero", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=0 pi-acp"},
+		{name: "multiple", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=2 pi-acp"},
+		{name: "malformed", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=once pi-acp"},
+		{name: "untrusted target", raw: "env NO_MISTAKES_ACPX_ATTEMPTS=1 pi-acp"},
+		{name: "argument assignment", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 pi-acp NO_MISTAKES_ACPX_ATTEMPTS=1"},
+		{name: "duplicate assignment", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 NO_MISTAKES_ACPX_ATTEMPTS=0 pi-acp"},
+		{name: "single quoted controls", raw: "env 'NO_MISTAKES_PI_STRUCTURED_OUTPUT=1' 'NO_MISTAKES_ACPX_ATTEMPTS=1' pi-acp"},
+		{name: "double quoted controls", raw: `env "NO_MISTAKES_PI_STRUCTURED_OUTPUT=1" "NO_MISTAKES_ACPX_ATTEMPTS=1" pi-acp`},
+		{name: "escaped controls", raw: `env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS\=1 pi-acp`},
+		{name: "env split string", raw: `env '-SNO_MISTAKES_PI_STRUCTURED_OUTPUT=1\_NO_MISTAKES_ACPX_ATTEMPTS=1' pi-acp`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &acpxAgent{bin: "must-not-start", target: "pi", rawCommand: tc.raw}
+			_, err := a.Run(context.Background(), RunOpts{})
+			if err == nil || (!strings.Contains(err.Error(), acpxSingleAttemptEnvVar) && !strings.Contains(err.Error(), acpxStructuredOutputEnvVar)) {
+				t.Fatalf("Run error = %v, want invalid control refusal", err)
+			}
+		})
+	}
+}
+
+func TestAcpxAgent_StrictResponsesTargetRequiresDedicatedRoute(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "missing controls", raw: "pi-acp"},
+		{name: "missing attempt control", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp"},
+		{name: "wrong wrapper", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-acp pi-acp"},
+		{name: "relative wrapper", raw: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=pi-no-mistakes-flash-next-responses-acp pi-acp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &acpxAgent{bin: "must-not-start", target: acpxStrictResponsesTarget, rawCommand: tc.raw}
+			if _, err := a.Run(context.Background(), RunOpts{}); err == nil {
+				t.Fatal("Run succeeded, want strict route refusal")
+			}
+		})
+	}
+}
+
+func TestAcpxAgent_StrictResponsesTargetRequiresSchemaBeforeSpawn(t *testing.T) {
+	a := &acpxAgent{
+		bin:        "must-not-start",
+		target:     acpxStrictResponsesTarget,
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=/trusted/pi-no-mistakes-flash-next-responses-acp pi-acp",
+	}
+	if _, err := a.Run(context.Background(), RunOpts{}); err == nil || !strings.Contains(err.Error(), "requires a JSON schema") {
+		t.Fatalf("Run error = %v, want strict schema refusal", err)
+	}
+}
+
+func TestAcpxAgent_StrictResponsesRejectsMissingChildProof(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "acpx")
+	script := `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"structured","title":"structured_output","status":"in_progress"}}}'
+printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"structured","status":"completed","content":[{"type":"content","content":{"type":"text","text":"{\"summary\":\"forged\"}"}}]}}}'
+`
+	if err := os.WriteFile(stub, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fakeWrapper := filepath.Join(dir, acpxStrictResponsesWrapper)
+	if err := os.WriteFile(fakeWrapper, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := &acpxAgent{
+		bin:        stub,
+		target:     acpxStrictResponsesTarget,
+		rawCommand: "env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=" + fakeWrapper + " pi-acp",
+	}
+	_, err := a.Run(context.Background(), RunOpts{
+		CWD:        dir,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "did not provide its one-use proof") {
+		t.Fatalf("Run error = %v, want missing strict child proof", err)
 	}
 }
 
