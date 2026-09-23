@@ -17,8 +17,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// ciFailingCheckFixRules is the CI-repair prompt contract for a failing check.
-// The narrow-fix sentence matches the review fixer so both apply one discipline.
 var errCIAttestationUnsettled = errors.New("CI repair attestation is unsettled")
 
 // errAttestationWriteFailed marks a failure specifically inside
@@ -31,15 +29,27 @@ var errCIAttestationUnsettled = errors.New("CI repair attestation is unsettled")
 // propagates whatever publishRunHead returns.
 var errAttestationWriteFailed = errors.New("pipeline attestation write failed")
 
+// ciFixerClassRules is shared by every CI-repair prompt path so failing-check,
+// combined, and merge-conflict-only repairs follow the Review fixer's same
+// invariant-complete discipline.
+const ciFixerClassRules = `- Before changing code, state for each finding the invariant it violates (what must always hold, in one sentence) and enumerate every place in the changed area where that same invariant must hold: every axis, direction, and representation; every sibling call path, command, action, and state transition; every consumer of the same input, field, or record. Fix the invariant at all of those places in this round, with the same small correction, or at the one shared boundary that makes all of them hold. A fix that closes only the reported site and leaves a sibling site reachable is incomplete; the next review will report the sibling.
+- Do not grow the fix into machinery: closing sibling sites with the same small edit, or moving a check to one shared boundary, is the fix; adding handling, state, fallbacks, retries, or a subsystem to manage symptoms is not. Prefer addressing a deeper architectural reason and simplifying it, than introducing machinery to handle the symptoms.
+- After applying the fixes and before verification, re-trace for each finding the concrete failing sequence it describes through the code as it now is, and trace the ordinary successful path through every function you changed, including each of its callers. Remove any alias, branch, parameter, or helper your fix made unreachable. A fix that makes the reported sequence pass while breaking the ordinary path, a caller's assumption, or a sibling site is a regression the next review will report.`
+
 const ciFailingCheckFixRules = `- If a failing check is caused by this PR's code (a broken test, build, lint, or similar defect in the change), you MUST produce file changes that fix it and set code_change_needed to true. A real failing test or build must still be fixed.
 		- If a failing check is not caused by the code under review (a stale or superseded check run, an infrastructure or attestation check such as "PR must be raised via no-mistakes" that fails only because a later pipeline push moved the head, or any failure external to the code), you MAY conclude that no code change is warranted. Set code_change_needed to false and report that conclusion in summary instead of editing files. Do not invent work to satisfy a check the code did not cause.
 		- If a test fails only on a specific OS (e.g. Windows CRLF, path separators), fix the test to be cross-platform.
 		- If a test is flaky, make it deterministic.
 		- Make the smallest correct root-cause fix.
-		- Fix the reported instance narrowly. Prefer doing so by addressing a deeper architectural reason and simplifying it, than introducing machinery to handle the symptoms.
+` + ciFixerClassRules + `
 		- Do not add new subsystems, guards, instructions, or behaviors beyond what the specific failing check requires.
 		- Do not refactor beyond what is needed for that root-cause fix.
 		- Verify the fix by running the most relevant commands locally before finishing.`
+
+const ciMergeConflictFixRules = `- Resolve the merge conflicts by applying the minimal necessary changes.
+		- Do not make unrelated file edits.
+` + ciFixerClassRules + `
+		- Verify the rebase completes cleanly before finishing.`
 
 // repairFromFindings runs one CI fix round over the findings the executor
 // selected for it (sctx.PreviousFindings): the auto-fix subset of the last
@@ -91,7 +101,7 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	if outcome := pipeline.ProtectedPathOutcome(err); outcome != nil {
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
 	}
-	if outcome := ciFixAgentBudgetOutcome(sctx, issueDesc, err); outcome != nil {
+	if outcome := s.ciFixAgentBudgetOutcome(sctx, issueDesc, err); outcome != nil {
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
 	}
 	if err != nil && errors.Is(err, errCIAttestationUnsettled) {
@@ -182,9 +192,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 		promptRules = ciFailingCheckFixRules
 	case mergeConflict:
 		promptIntro = "The PR has merge conflicts with the base branch. Rebase onto the base branch and resolve the merge conflicts."
-		promptRules = `- Resolve the merge conflicts by applying the minimal necessary changes.
-		- Do not make unrelated file edits.
-		- Verify the rebase completes cleanly before finishing.`
+		promptRules = ciMergeConflictFixRules
 	case len(failingNames) == 0:
 		promptIntro = "Address the following findings selected at the CI gate of this PR."
 		promptRules = ciFailingCheckFixRules
@@ -488,12 +496,29 @@ func ciSelectedFindingsPrompt(findings Findings) string {
 	return section + prefix + string(raw) + suffix
 }
 
-func ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err error) *pipeline.StepOutcome {
+func (s *CIStep) ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err error) *pipeline.StepOutcome {
 	if err == nil || !errors.Is(err, pipeline.ErrAgentTimeout) {
 		return nil
 	}
 	sctx.Log(fmt.Sprintf("CI auto-fix agent exceeded its invocation budget: %v", err))
-	return ciFixAgentTimeoutOutcome(issueDesc, dirtyRunWorktree(sctx), err)
+	var leftover []string
+	head, headErr := stepGitHeadSHA(sctx)
+	switch {
+	case rebaseInProgress(sctx.Ctx, sctx.WorkDir) || mergeInProgress(sctx.Ctx, sctx.WorkDir):
+		leftover = append(leftover, fmt.Sprintf("The timed-out agent left an unfinished rebase or merge in the run worktree at %s; its partial HEAD is not recorded.", sctx.WorkDir))
+	case headErr == nil && head != "" && head != sctx.Run.HeadSHA:
+		if _, recErr := s.recordLocalRepair(sctx, head); recErr != nil {
+			sctx.Log(fmt.Sprintf("warning: could not record timed-out CI repair head %s: %v", head, recErr))
+			leftover = append(leftover, fmt.Sprintf("The timed-out agent left a committed head at %s in the run worktree.", shortObjectID(head)))
+		} else {
+			sctx.Log("timed-out CI repair head recorded locally; waiting for a decision instead of auto-revalidating")
+			leftover = append(leftover, fmt.Sprintf("The timed-out agent committed %s; it is recorded locally for custody and is not published.", shortObjectID(head)))
+		}
+	}
+	if dirty := dirtyRunWorktree(sctx); dirty != "" {
+		leftover = append(leftover, fmt.Sprintf("The timed-out agent left uncommitted changes in the run worktree at %s; they are not committed or pushed.", dirty))
+	}
+	return ciFixAgentTimeoutOutcome(issueDesc, strings.Join(leftover, " "), err)
 }
 
 // dirtyRunWorktree reports the run worktree path when the timed-out agent left
@@ -551,7 +576,7 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string) (ciRep
 	if strings.TrimSpace(status) == "" {
 		sctx.Log("no changes to commit")
 		headSHA, err := stepGitHeadSHA(sctx)
-		if err == nil && headSHA != sctx.Run.HeadSHA {
+		if err == nil && ciHeadAwaitsRecording(sctx, headSHA) {
 			return s.recordRepair(sctx, headSHA)
 		}
 		return ciRepairResult{}, nil
@@ -560,12 +585,29 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string) (ciRep
 	if summary == "" {
 		summary = "repair failing checks"
 	}
-	message, err := sctx.Config.Commit.RenderFixMessage(types.StepCI, summary)
+	message, err := sctx.Config.Commit.RenderFixMessageForBranch(types.StepCI, summary, sctx.Run.Branch)
 	if err != nil {
 		return ciRepairResult{}, fmt.Errorf("render CI repair commit message: %w", err)
 	}
 	if err := stagePipelineChanges(sctx); err != nil {
 		return ciRepairResult{}, fmt.Errorf("stage CI changes: %w", err)
+	}
+	staged, err := stagedChangesPresent(func(args ...string) (string, error) {
+		return stepGitRun(sctx, args...)
+	})
+	if err != nil {
+		return ciRepairResult{}, fmt.Errorf("inspect staged CI changes: %w", err)
+	}
+	if !staged {
+		sctx.Log("no staged CI changes to commit")
+		headSHA, err := stepGitHeadSHA(sctx)
+		if err != nil {
+			return ciRepairResult{}, fmt.Errorf("resolve head after empty CI handoff: %w", err)
+		}
+		if ciHeadAwaitsRecording(sctx, headSHA) {
+			return s.recordRepair(sctx, headSHA)
+		}
+		return ciRepairResult{}, nil
 	}
 	if _, err := stepGitRun(sctx, "commit", "-m", message); err != nil {
 		return ciRepairResult{}, fmt.Errorf("commit: %w", err)
@@ -576,6 +618,19 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string) (ciRep
 	}
 
 	return s.recordRepair(sctx, headSHA)
+}
+
+// ciHeadAwaitsRecording reports whether a fix round that committed nothing
+// itself still has a head for recordRepair: one the agent committed, or a
+// repair already recorded locally but never published, such as the commit of a
+// fix agent that ran out of budget. Without the second case a later round that
+// adds nothing would leave that repair stranded behind the old published head.
+func ciHeadAwaitsRecording(sctx *pipeline.StepContext, headSHA string) bool {
+	if headSHA != sctx.Run.HeadSHA {
+		return true
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	return err == nil && run != nil && run.LastPushedSHA != nil && !strings.EqualFold(strings.TrimSpace(*run.LastPushedSHA), headSHA)
 }
 
 // ciRevalidatesRepairs reports whether this run must re-run the whole pipeline
@@ -666,10 +721,10 @@ func ciRepairContinuityGap(sctx *pipeline.StepContext, headSHA string) string {
 // Review has approved it again. The CI monitor turns that into a restart at
 // Review.
 func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA string) (ciRepairResult, error) {
-	ref := normalizedBranchRef(sctx.Run.Branch)
-	if _, err := stepGitRun(sctx, "update-ref", ref, headSHA); err != nil {
-		return ciRepairResult{}, fmt.Errorf("update local branch ref: %w", err)
+	if err := updateNonSharedBranchRef(sctx, headSHA); err != nil {
+		return ciRepairResult{}, err
 	}
+	startingHead := sctx.Run.HeadSHA
 	// Durable first, then in memory. Advancing the live head before the write
 	// succeeds leaves the monitor watching a head the durable record does not
 	// know about, still holding its old review approval, with the revalidation
@@ -679,6 +734,7 @@ func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA string) (
 	}
 	sctx.Run.HeadSHA = headSHA
 	sctx.Run.ReviewApprovedHeadSHA = nil
+	pipeline.PersistUncertifiedPipelineRange(sctx, startingHead, headSHA)
 	sctx.Log("committed CI repair for revalidation")
 	return ciRepairResult{HeadAdvanced: true, Revalidate: true}, nil
 }
@@ -725,8 +781,8 @@ func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRe
 // Push step (which always runs after this run's review/test/document have
 // already completed).
 //
-// It is a no-op - not an error - when: the provider is not GitHub (only
-// GitHub emits the HTML attestation comment and implements PRContentReader);
+// It is a no-op - not an error - when: the provider has no supported raw
+// content contract;
 // the branch is the configured PR base branch (the PR step never manages a
 // PR there either, see effectivePRBaseBranch); the SCM host is unavailable
 // (matches the PR step's own skip semantics); or no PR exists yet for this
@@ -736,7 +792,7 @@ func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRe
 // not settle) is wrapped in errAttestationWriteFailed and returned.
 func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*db.StepResult) error {
 	provider := resolvedProvider(sctx)
-	if provider != scm.ProviderGitHub {
+	if !supportsPRTemplates(provider) {
 		return nil
 	}
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
@@ -767,28 +823,37 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 	if pr == nil {
 		return nil
 	}
-	if err := restampPRAttestationWithSteps(sctx.Ctx, host, pr, headSHA, steps, sctx.Log); err != nil {
+	if err := restampPRAttestationWithSteps(sctx.Ctx, host, pr, headSHA, steps, sctx.Log, attestationPolicyFrom(sctx)); err != nil {
 		return fmt.Errorf("%w: %v", errAttestationWriteFailed, err)
 	}
 	return nil
+}
+
+func attestationPolicyFrom(sctx *pipeline.StepContext) pipelineAttestationPolicy {
+	policy := pipelineAttestationPolicy{}
+	if sctx != nil && sctx.Config != nil {
+		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
+	}
+	return policy
 }
 
 // restampPRAttestation re-reads the current PR body, rewrites only the live
 // pipeline-attestation marker to newHeadSHA, and writes the body back without
 // sending a title. It does not insert an attestation that was not already
 // there. A host without PRContentReader is skipped with a warning rather than
-// failed: missing-reader is not a settlement miss, and making it fatal parks
-// every non-GitHub publish.
+// failed: missing-reader is not a settlement miss. All currently supported
+// providers have readers; this keeps the optional-interface fallback intact.
 func restampPRAttestation(ctx context.Context, host scm.Host, pr *scm.PR, newHeadSHA string, logfn func(string)) error {
-	return restampPRAttestationWithSteps(ctx, host, pr, newHeadSHA, nil, logfn)
+	return restampPRAttestationWithSteps(ctx, host, pr, newHeadSHA, nil, logfn, pipelineAttestationPolicy{})
 }
 
 // restampPRAttestationWithSteps is restampPRAttestation with an explicit step
-// list. A nil steps keeps whatever statuses the existing attestation already
-// carried (rebindPipelineAttestationWithSteps' nil behavior); a non-nil steps
-// replaces them outright. See attestHeadBeforePush for why a caller picks
-// one over the other.
-func restampPRAttestationWithSteps(ctx context.Context, host scm.Host, pr *scm.PR, newHeadSHA string, steps []*db.StepResult, logfn func(string)) error {
+// list and the current trusted attestation policy. A nil steps keeps whatever
+// statuses the existing attestation already carried; a non-nil steps replaces
+// them outright. allow_test_command_override always comes from policy, never
+// from the previous attestation. See attestHeadBeforePush for why a caller
+// picks one steps argument over the other.
+func restampPRAttestationWithSteps(ctx context.Context, host scm.Host, pr *scm.PR, newHeadSHA string, steps []*db.StepResult, logfn func(string), policy pipelineAttestationPolicy) error {
 	reader, ok := host.(scm.PRContentReader)
 	if !ok || pr == nil {
 		if logfn != nil && !ok {
@@ -801,12 +866,22 @@ func restampPRAttestationWithSteps(ctx context.Context, host scm.Host, pr *scm.P
 	for attempt := 1; attempt <= attempts; attempt++ {
 		content, err := reader.GetPRContent(ctx, pr)
 		if err == nil {
-			updated, rebound := rebindPipelineAttestationWithSteps(content.Body, newHeadSHA, steps)
+			updated, rebound, rebindErr := rebindOwnedPRAttestation(content.Body, newHeadSHA, steps, policy)
+			if rebindErr != nil {
+				return fmt.Errorf("rebind PR appendix: %w", rebindErr)
+			}
+			// Azure's adapter clamps ordinary descriptions. Owned writes must
+			// fail before that boundary can cut off author text or the digest.
+			if rebound && hasPRAppendixMarkers(updated) {
+				if err := validateOwnedPRBudget(updated, scm.MaxPRBodyChars(host.Provider())); err != nil {
+					return err
+				}
+			}
 			if !rebound || updated == content.Body {
 				return nil
 			}
 
-			// UpdatePR replaces the complete body and GitHub offers no atomic
+			// UpdatePR replaces the complete body; this is not an atomic
 			// marker-only edit. Confirm that the body is still the version we
 			// prepared before writing it. If someone edited it meanwhile, retry
 			// from their version instead of overwriting their changes.
