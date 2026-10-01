@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 )
 
 // Run represents a pipeline run.
@@ -82,11 +84,21 @@ type Run struct {
 	// It is set by the operator (axi run --base-branch) and takes precedence
 	// over pr.base_branch in repo config for this run only.
 	PRBaseBranch *string
-	CreatedAt    int64
-	UpdatedAt    int64
+	// OmitIntent records the caller-side, tighten-only decision to keep the
+	// generated Intent section out of the PR body for this run. It is the
+	// OR of the per-run flag and the operator's global intent.publish_intent
+	// default, resolved once at run start. It can only reduce publication:
+	// the repository's trusted pr.publish_intent is enforced independently
+	// by the PR step.
+	OmitIntent bool
+	// PiProfile is immutable launch selection; nil retains legacy live config.
+	PiProfile        *agentcfg.PiProfile
+	VerificationPlan *verificationplan.Snapshot
+	CreatedAt        int64
+	UpdatedAt        int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, verification_plan, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -99,7 +111,7 @@ func scanRun(row interface {
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.LaunchNonce, &r.LaunchValidationGeneration, &r.LaunchIntentDigest, &r.LaunchReceiptClaimedAt,
-		&r.PRBaseBranch,
+		&r.PRBaseBranch, &r.OmitIntent, &r.PiProfile, &r.VerificationPlan,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
 }
@@ -120,13 +132,18 @@ func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
 }
 
 func (d *DB) InsertRunWithIntent(repoID, branch, headSHA, baseSHA string, intent *RunIntent, prBaseBranch string) (*Run, error) {
-	return d.InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA, intent, "", "", "", prBaseBranch)
+	return d.InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA, intent, "", "", "", prBaseBranch, false, nil)
 }
 
-// InsertRunWithIntentAndLaunchNonce persists an optional proof binding. The
-// partial unique index remains the duplicate defense across daemon processes;
-// callers additionally serialize selection under their branch lock.
-func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string) (*Run, error) {
+// InsertRunWithIntentAndLaunchNonce persists an optional proof binding and the
+// caller-side omit-intent decision. The partial unique index remains the
+// duplicate defense across daemon processes; callers additionally serialize
+// selection under their branch lock.
+func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, profiles ...*agentcfg.PiProfile) (*Run, error) {
+	pin := agentcfg.OptionalPiProfile(profiles)
+	if err := pin.Validate(); err != nil {
+		return nil, err
+	}
 	ts := now()
 	version := buildinfo.CurrentVersion()
 	buildSHA := buildinfo.Commit
@@ -139,9 +156,14 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 		SubmittedHeadSHA:   &headSHA,
 		NoMistakesVersion:  &version,
 		NoMistakesBuildSHA: &buildSHA,
+		PiProfile:          pin,
 		Status:             types.RunPending,
 		CreatedAt:          ts,
 		UpdatedAt:          ts,
+	}
+	if plan != nil {
+		r.ID = plan.ID
+		r.VerificationPlan = plan
 	}
 	if launchNonce != "" {
 		r.LaunchNonce = &launchNonce
@@ -158,9 +180,10 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 	if prBaseBranch != "" {
 		r.PRBaseBranch = &prBaseBranch
 	}
+	r.OmitIntent = omitIntent
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, omit_intent, pi_profile, verification_plan, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.OmitIntent, r.PiProfile, r.VerificationPlan, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
@@ -323,7 +346,15 @@ func (d *DB) GetRunByLaunchNonce(repoID, branch, launchNonce string) (*Run, erro
 // this caller is its first observer. The expected immutable receipt binding,
 // including an explicit PR base branch, is part of the UPDATE predicate, so a
 // conflicting observer cannot consume `created`.
-func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string) (*Run, bool, error) {
+func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, profiles ...*agentcfg.PiProfile) (*Run, bool, error) {
+	request := agentcfg.OptionalPiProfile(profiles)
+	if err := request.ValidateRequest(); err != nil {
+		return nil, false, err
+	}
+	model, effort := "", ""
+	if request != nil {
+		model, effort = request.Model, string(request.Effort)
+	}
 	prBaseBranch = strings.TrimSpace(prBaseBranch)
 	for {
 		r := &Run{}
@@ -332,9 +363,12 @@ func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, v
 			 WHERE repo_id = ? AND branch = ? AND launch_nonce = ?
 			   AND submitted_head_sha = ? AND launch_validation_generation = ? AND launch_intent_digest = ?
 			   AND (? = '' OR pr_base_branch = ?)
+			   AND (? = 0 OR omit_intent = ?)
+			   AND (? = '' OR json_extract(pi_profile, '$.model') = ?)
+			   AND (? = '' OR json_extract(pi_profile, '$.effort') = ?)
 			   AND launch_receipt_claimed_at IS NULL
 			 RETURNING `+runColumns,
-			now(), repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, prBaseBranch,
+			now(), repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, prBaseBranch, omitIntent, omitIntent, model, model, effort, effort,
 		), r)
 		if err == nil {
 			return r, true, nil
@@ -346,11 +380,12 @@ func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, v
 		if err != nil {
 			return nil, false, err
 		}
-		if r == nil || r.LaunchReceiptClaimedAt != nil ||
+		if r == nil || !r.PiProfile.Matches(request) || r.LaunchReceiptClaimedAt != nil ||
 			r.SubmittedHeadSHA == nil || *r.SubmittedHeadSHA != submittedHeadSHA ||
 			r.LaunchValidationGeneration == nil || *r.LaunchValidationGeneration != validationGeneration ||
 			r.LaunchIntentDigest == nil || *r.LaunchIntentDigest != intentDigest ||
-			prBaseBranch != "" && (r.PRBaseBranch == nil || *r.PRBaseBranch != prBaseBranch) {
+			prBaseBranch != "" && (r.PRBaseBranch == nil || *r.PRBaseBranch != prBaseBranch) ||
+			omitIntent && !r.OmitIntent {
 			return r, false, nil
 		}
 		// A creator committed a matching row after UPDATE missed. Retry instead
@@ -505,6 +540,60 @@ func (d *DB) UpdateRunPublication(id string, binding PushBinding) error {
 		return fmt.Errorf("update run publication: %w", err)
 	}
 	return nil
+}
+
+// PushRebind is the exact verified state a rewritten-remote recovery may
+// rebind from and the live head it rebinds to. UpstreamURL and ForkURL are the
+// repo target the live head was verified against.
+type PushRebind struct {
+	Status             types.RunStatus
+	ExpectedPushed     string
+	ExpectedGeneration int64
+	ExpectedHead       string
+	PRState            *string
+	CustodyReturned    bool
+	UpstreamURL        string
+	ForkURL            string
+	TargetKind         string
+	TargetFingerprint  string
+	Ref                string
+	Head               string
+}
+
+// RebindRunPushedHead moves a terminal run's push binding to a head the
+// configured target was verified to hold after a rewrite outside the pipeline.
+// It is a single compare-and-swap over the exact binding and repo target the
+// caller verified (run status, pushed head, generation, recorded run head and
+// custody state, target kind,
+// fingerprint, ref, no active push, no retired PR, no other non-terminal run
+// on the same repo branch, and the repo's current upstream and fork URLs) and
+// reports whether it applied. head_sha follows only
+// when it equalled the old binding, so a custody-returned run keeps its own
+// recorded head.
+func (d *DB) RebindRunPushedHead(id string, rebind PushRebind) (bool, error) {
+	result, err := d.sql.Exec(
+		`UPDATE runs SET head_sha = CASE WHEN head_sha = last_pushed_sha THEN ? ELSE head_sha END, last_pushed_sha = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ?
+		WHERE id = ? AND status = ? AND last_pushed_sha = ? AND COALESCE(push_generation, 0) = ?
+			AND head_sha = ? AND (custody_returned_at IS NOT NULL) = ?
+			AND push_target_kind = ? AND push_target_fingerprint = ? AND push_ref = ? AND COALESCE(push_active, 0) = 0
+			AND pr_state IS ? AND COALESCE(pr_state, '') NOT IN ('merged', 'closed')
+			AND NOT EXISTS (SELECT 1 FROM runs other WHERE other.repo_id = runs.repo_id AND other.branch = runs.branch AND other.id <> runs.id
+				AND other.status NOT IN (?, ?, ?, ?))
+			AND EXISTS (SELECT 1 FROM repos WHERE repos.id = runs.repo_id AND repos.upstream_url = ? AND COALESCE(repos.fork_url, '') = ?)`,
+		rebind.Head, rebind.Head, now(), id, string(rebind.Status), rebind.ExpectedPushed, rebind.ExpectedGeneration,
+		rebind.ExpectedHead, rebind.CustodyReturned,
+		rebind.TargetKind, rebind.TargetFingerprint, rebind.Ref, rebind.PRState,
+		string(types.RunCompleted), string(types.RunFailed), string(types.RunCancelled), string(types.RunCIMonitorInterrupted),
+		rebind.UpstreamURL, rebind.ForkURL,
+	)
+	if err != nil {
+		return false, fmt.Errorf("rebind run pushed head: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rebind run pushed head: %w", err)
+	}
+	return affected == 1, nil
 }
 
 // SetRunCustodyReturned stamps the moment a guarded recovery explicitly
@@ -769,6 +858,16 @@ func (d *DB) UpdateRunStatusWithVerifiedHead(id string, status types.RunStatus, 
 	return nil
 }
 
+func (d *DB) VerifyTerminalRunHeadRewrite(id string, status types.RunStatus, recordedHead, liveHead string) (bool, error) {
+	ts := now()
+	result, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ? AND head_sha = ? AND review_approved_head_sha = ? AND terminal_head_verified_at IS NULL AND custody_returned_at IS NULL`, liveHead, ts, ts, id, status, recordedHead, recordedHead)
+	if err != nil {
+		return false, fmt.Errorf("verify terminal run head rewrite: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	return updated == 1, err
+}
+
 // RecordRunTerminalHeadEvidence records a managed worktree head that was
 // verified immediately before crash recovery makes the run terminal. The
 // subsequent stale-run status transition deliberately preserves this stamp.
@@ -1020,6 +1119,35 @@ func recoveryExclusionClause(preserved map[string]struct{}) (string, []any) {
 		args = append(args, id)
 	}
 	return " AND id NOT IN (" + strings.Join(placeholders, ", ") + ")", args
+}
+
+// GetRunGates returns the gate list pinned to a run at creation, or the empty
+// string for a run that pinned none. The payload is opaque here: config owns
+// its shape (config.MarshalGates/ParseGates), and the database only guarantees
+// that what was written survives a restart.
+func (d *DB) GetRunGates(id string) (string, error) {
+	var gates sql.NullString
+	err := d.sql.QueryRow(`SELECT gates_json FROM runs WHERE id = ?`, id).Scan(&gates)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get run gates: %w", err)
+	}
+	return gates.String, nil
+}
+
+// SetRunGates records the repository-declared gates this run executes. The
+// caller writes it once, at run creation, before the executor can record a
+// single step, so the run's step sequence is fixed from the moment anything can
+// observe it and stays fixed even if the trusted default branch's gates change
+// while the run is in flight.
+func (d *DB) SetRunGates(id, gates string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET gates_json = ?, updated_at = ? WHERE id = ?`, gates, now(), id)
+	if err != nil {
+		return fmt.Errorf("set run gates: %w", err)
+	}
+	return nil
 }
 
 // GetRunCIRerunState returns the CI step's persisted rerun budget for a run, or

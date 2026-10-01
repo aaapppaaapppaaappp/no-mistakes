@@ -186,6 +186,14 @@ type Check struct {
 	// it can never be true for a genuine test or lint failure, whose job cleared
 	// setup and failed a later step.
 	PreRunFailure bool
+	// AwaitingApproval marks a check the provider is holding until a human
+	// approves it - GitHub holds a first-time contributor's workflows that
+	// way, concluding the run action_required without running a single job.
+	// Nothing about the commit produced it and no rerun can clear it, so it
+	// is a wait on a maintainer rather than a verdict on the code: such a
+	// check is reported pending, never failing, so the CI step waits for the
+	// approval instead of spending auto-fix rounds on work that never ran.
+	AwaitingApproval bool
 	// App identifies the provider application that published the check, when
 	// the provider reports one: on GitHub it is the check suite's app slug
 	// ("github-actions" for every Actions job, "greptile-apps" for Greptile's
@@ -333,9 +341,10 @@ type ReviewCommentsHost interface {
 }
 
 // PRContentReader is an optional interface for hosts that can read the current
-// title and body of an existing PR. The CI repair publisher uses it to rebind
-// a live pipeline attestation to a newly published head without rewriting the
-// rest of the body or inventing an attestation that was not already there.
+// title and raw body of an existing PR. Readers must distinguish an explicitly
+// empty body from missing, null, or malformed content and reject the latter.
+// Author-preserving publication and pre-push/CI attestation refresh depend on
+// this distinction to avoid replacing author text after an incomplete read.
 type PRContentReader interface {
 	GetPRContent(ctx context.Context, pr *PR) (PRContent, error)
 }

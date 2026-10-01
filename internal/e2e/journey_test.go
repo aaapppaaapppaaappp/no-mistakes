@@ -464,6 +464,9 @@ func cleanReviewScenario(t *testing.T) string {
           reason: ""
       verdict: go
       artifacts: []
+      reviewed_paths:
+        - "agent-edits.txt"
+        - ".no-mistakes.yaml"
   - match: "You are validating a code change by driving the product itself. Derive the scenarios this change must satisfy, then run each one against the real running product.\n\nContext:\n- branch: test-agent-new-test-file"
     text: "tests passed after adding a regression test"
     edits:
@@ -865,8 +868,8 @@ func assertDaemonNotifyPushUnknownRepo(t *testing.T, h *Harness) {
 	if err == nil {
 		t.Fatalf("daemon notify-push for invalid gate path should fail, got output:\n%s", out)
 	}
-	if !strings.Contains(out, "invalid gate path") {
-		t.Errorf("daemon notify-push invalid gate path output should mention 'invalid gate path', got:\n%s", out)
+	if !strings.Contains(out, "not a managed gate path") {
+		t.Errorf("daemon notify-push invalid gate path output should mention 'not a managed gate path', got:\n%s", out)
 	}
 }
 

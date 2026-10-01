@@ -252,8 +252,8 @@ func TestLintStep_RunsOwnPassWithoutCombinedResult(t *testing.T) {
 	if outcome.NeedsApproval {
 		t.Fatal("clean lint pass must not park")
 	}
-	if outcome.FixSummary != noChangesAppliedSummary {
-		t.Fatalf("fix summary = %q, want %q", outcome.FixSummary, noChangesAppliedSummary)
+	if outcome.FixSummary != NoChangesAppliedSummary {
+		t.Fatalf("fix summary = %q, want %q", outcome.FixSummary, NoChangesAppliedSummary)
 	}
 }
 
@@ -324,6 +324,7 @@ func TestLintStep_FixRoundReassessesWithOwnAgentPass(t *testing.T) {
 // pass must cost exactly one.
 func TestPipeline_DocumentPlusLintIsOneAgentInvocation(t *testing.T) {
 	workDir, baseSHA, headSHA := setupGitRepo(t)
+	ensureHermeticOrigin(t, workDir)
 
 	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {

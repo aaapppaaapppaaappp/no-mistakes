@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"strings"
 	"unicode/utf8"
 
@@ -48,17 +49,24 @@ type commitSummary struct {
 var errRejectedCommitSummary = errors.New("rejected commit summary")
 
 const (
-	noChangesAppliedSummary = "no changes applied"
+	// NoChangesAppliedSummary is the fix result of a round that changed
+	// nothing; it is not a fix the pipeline applied.
+	NoChangesAppliedSummary = "no changes applied"
 	changesAppliedSummary   = "changes applied"
 )
 
 const fixerRemovalRule = `
 
 Removal-first rule:
-- When a problem can be solved by removing a code path that is not strictly required to satisfy the intent - an extra acceptance or matching branch, a fallback, an alias, a second definition of something the code already defines once, or handling for an input nobody intends - fix it by removing that path, not by validating, hardening, or documenting it. Judge what the intent strictly requires against the User intent section when present, otherwise against the change's own stated purpose. Removal is the smallest fix for such a path: hardening it leaves the unrequired path in place for the next review to find another hole in.`
+- When a problem can be solved by removing a code path that is not strictly required to satisfy the intent - an extra acceptance or matching branch, a fallback, an alias, a second definition of something the code already defines once, or handling for an input nobody intends - fix it by removing that path, not by validating, hardening, or documenting it. Judge what the intent strictly requires against the User intent section when present, otherwise against the change's own stated purpose. Later recorded human fix decisions supersede conflicting original intent. Removal is the smallest fix for such a path: hardening it leaves the unrequired path in place for the next review to find another hole in.`
 
+// fixerPrompt wraps every shared fix-turn prompt with the two rules that apply
+// to all of them: the removal-first rule and the limit on independently
+// initiated memory-file edits. Review, Test, Lint, and custom-gate fix turns
+// route through executeFixMode, and the Lint agent pass and the CI repair wrap
+// their prompts the same way, so this is the insertion point for fix-turn rules.
 func fixerPrompt(prompt string) string {
-	return prompt + fixerRemovalRule
+	return prompt + fixerRemovalRule + agent.MemoryFilesRule
 }
 
 var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
@@ -79,17 +87,163 @@ func hasBlockingFindings(items []Finding) bool {
 	return false
 }
 
+// reviewedPathsCoverReviewable reports whether reviewedPaths (a review turn's
+// self-reported coverage) exactly covers reviewablePaths. Comparison is by
+// cleaned path so "./x" and "x" match.
+func reviewedPathsCoverReviewable(reviewedPaths, reviewablePaths []string) bool {
+	allowed := make(map[string]bool, len(reviewablePaths))
+	for _, candidate := range reviewablePaths {
+		normalized := normalizeReviewedPath(candidate)
+		if normalized == "" {
+			return false
+		}
+		allowed[normalized] = true
+	}
+	covered := make(map[string]bool, len(reviewedPaths))
+	for _, reviewed := range reviewedPaths {
+		normalized := normalizeReviewedPath(reviewed)
+		if normalized == "" || !allowed[normalized] {
+			return false
+		}
+		covered[normalized] = true
+	}
+	for candidate := range allowed {
+		if !covered[candidate] {
+			return false
+		}
+	}
+	return true
+}
+
+// uncoveredReviewablePaths returns the reviewable paths that no reviewed_paths
+// entry covers, in reviewable order. Out-of-scope entries cannot cover
+// anything, so they are ignored here; the strict
+// reviewedPathsCoverReviewable check still fails the round for them.
+func uncoveredReviewablePaths(reviewedPaths, reviewablePaths []string) []string {
+	covered := make(map[string]bool, len(reviewedPaths))
+	for _, reviewed := range reviewedPaths {
+		covered[normalizeReviewedPath(reviewed)] = true
+	}
+	var missing []string
+	for _, candidate := range reviewablePaths {
+		if !covered[normalizeReviewedPath(candidate)] {
+			missing = append(missing, candidate)
+		}
+	}
+	return missing
+}
+
+// hasInvalidReviewedPath reports whether a coverage record contains an entry
+// that does not normalize to a path at all (empty, whitespace, or "."). Such
+// an entry is invalid coverage evidence: reviewedPathsCoverReviewable fails on
+// it, so the round can only park, and no further review can cure it.
+func hasInvalidReviewedPath(reviewedPaths []string) bool {
+	for _, reviewed := range reviewedPaths {
+		if normalizeReviewedPath(reviewed) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeReviewedPaths unions two coverage records, keeping each path's first
+// spelling and order. It is the deterministic merge behind the focused
+// coverage pass: the round's record is what its turns actually examined
+// together, and the strict coverage check re-runs on the union.
+//
+// An entry that does not normalize to a path is kept, not folded away: it is
+// invalid coverage evidence, and dropping it would let the completion turn
+// launder the invalidity out of the union and certify a record that never had
+// positive coverage. Keeping one such entry makes reviewedPathsCoverReviewable
+// keep failing on the union, so the round parks with it named.
+func mergeReviewedPaths(first, second []string) []string {
+	seen := make(map[string]bool, len(first)+len(second))
+	var merged []string
+	invalidKept := false
+	for _, path := range append(append([]string(nil), first...), second...) {
+		key := normalizeReviewedPath(path)
+		if key == "" {
+			if invalidKept {
+				continue
+			}
+			invalidKept = true
+		} else {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
+		merged = append(merged, path)
+	}
+	return merged
+}
+
+// uncoveredReviewMessage names why a clean review round is parked instead of
+// certifying the head: the reviewable files its reviewed_paths did not cover
+// (or the whole set when the field was omitted), and any path it claimed that
+// is not a reviewable changed file.
+func uncoveredReviewMessage(reviewedPaths, reviewablePaths []string) string {
+	if reviewedPaths == nil {
+		return fmt.Sprintf("review reported no reviewed_paths; parking for approval with %d reviewable file(s) unverified: %s", len(reviewablePaths), strings.Join(reviewablePaths, ", "))
+	}
+	allowed := make(map[string]bool, len(reviewablePaths))
+	for _, candidate := range reviewablePaths {
+		allowed[normalizeReviewedPath(candidate)] = true
+	}
+	covered := make(map[string]bool, len(reviewedPaths))
+	var outOfScope []string
+	for _, reviewed := range reviewedPaths {
+		normalized := normalizeReviewedPath(reviewed)
+		if normalized == "" {
+			outOfScope = append(outOfScope, `""`)
+			continue
+		}
+		if !allowed[normalized] {
+			outOfScope = append(outOfScope, reviewed)
+			continue
+		}
+		covered[normalized] = true
+	}
+	var missing []string
+	for _, candidate := range reviewablePaths {
+		if !covered[normalizeReviewedPath(candidate)] {
+			missing = append(missing, candidate)
+		}
+	}
+	msg := "review coverage is incomplete; parking for approval"
+	if len(missing) > 0 {
+		msg += fmt.Sprintf(" with %d reviewable file(s) unverified: %s", len(missing), strings.Join(missing, ", "))
+	}
+	if len(outOfScope) > 0 {
+		msg += fmt.Sprintf("; %d reviewed_paths entry(ies) outside the reviewable set: %s", len(outOfScope), strings.Join(outOfScope, ", "))
+	}
+	return msg
+}
+
+func normalizeReviewedPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	cleaned := path.Clean(value)
+	if cleaned == "." {
+		return ""
+	}
+	return cleaned
+}
+
 // assertPipelineHeadContinuity fails closed when the worktree HEAD is no longer
 // equal to or a descendant of the head the pipeline itself last recorded
-// (sctx.Run.HeadSHA). Every post-review step calls this guard at entry, and
-// commitAgentFixes calls it around commits that advance the recorded head.
+// (sctx.Run.HeadSHA). Every repository gate and every post-review core step
+// calls this guard at entry, and commitAgentFixes calls it around commits that
+// advance the recorded head.
 //
 // The pipeline advances HEAD only through its own commits, each of which updates
 // sctx.Run.HeadSHA in lockstep. If HEAD has diverged from that recorded head -
 // e.g. a concurrent process reset the shared worktree to a different commit -
-// then the reviewed change the pipeline approved is no longer in HEAD's history,
-// and continuing would ship an unreviewed tree. The whole job of this tool is
-// to not lose people's code, so we refuse rather than proceed.
+// then the pipeline's recorded history is no longer in HEAD, and continuing
+// could validate or ship a substituted tree. The whole job of this tool is to
+// not lose people's code, so we refuse rather than proceed.
 //
 // Anchor integrity: sctx.Run.HeadSHA is the correct, un-clobberable anchor. It
 // is the *recorded* head the pipeline itself produced at its last commit - held
@@ -100,11 +254,12 @@ func hasBlockingFindings(items []Finding) bool {
 // point the anchor still holds the reviewed head even after a clobber. The guard
 // deliberately compares the *recorded* head against the *live* worktree HEAD
 // (git.HeadSHA); it never derives the anchor from the mutable worktree, which
-// would be circular and defeatable. Because the guard runs at every post-review
-// step entry and at the very top of commitAgentFixes - before any commit that
-// would advance sctx.Run.HeadSHA - the next pipeline boundary after a clobber is
-// caught while the anchor is still the pre-clobber reviewed head; the anchor can
-// never be advanced into a clobbered lineage without first passing this check.
+// would be circular and defeatable. Because the guard runs at every repository
+// gate and post-review core-step entry, and at the very top of commitAgentFixes
+// before any commit that would advance sctx.Run.HeadSHA, the next pipeline
+// boundary after a clobber is caught while the anchor is still the pre-clobber
+// pipeline head. The anchor can never advance into a clobbered lineage without
+// first passing this check.
 //
 // This is what happened in run 01KXC3SD5NZYMERGDS68Z1C8ER: the review step
 // committed a correct fix, a sibling worktree sharing the bare repo reset HEAD
@@ -162,12 +317,12 @@ func assertPipelineHeadContinuity(sctx *pipeline.StepContext, stepName types.Ste
 // repository, the user's configuration, or the daemon's environment.
 //
 // Reach is deliberately narrow. Only commitAgentFixes (Review, Test, Document,
-// Lint) and the Push step's leftover-worktree commit route here, because those
-// are the two commits the pipeline authors from its own agents' and formatter's
-// output.
+// Lint, and an operator-authorized repository gate repair) and the Push step's
+// leftover-worktree commit route here. These are the two routes that commit the
+// pipeline's own agent and formatter output.
 // CI repair commits, the generic git runner, and every user-authored commit keep
-// hook verification; the Review, Test, Document, Lint, Push, PR, and CI gates
-// remain the authoritative quality checks for what these commits contain.
+// hook verification; the core pipeline and repository gates remain the
+// authoritative quality checks for what these commits contain.
 func commitPipelineCorrection(ctx context.Context, workDir, message string, logf func(string)) error {
 	return commitPipelineCorrectionWithCleanup(ctx, workDir, message, logf, os.RemoveAll)
 }
@@ -178,6 +333,15 @@ func commitPipelineCorrectionWithCleanup(
 	logf func(string),
 	cleanup func(string) error,
 ) error {
+	gitRun := func(args ...string) (string, error) { return git.Run(ctx, workDir, args...) }
+	staged, err := stagedChangesPresent(gitRun)
+	if err != nil {
+		return fmt.Errorf("inspect staged correction: %w", err)
+	}
+	if !staged {
+		return nil
+	}
+
 	emptyHooksDir, err := os.MkdirTemp("", "no-mistakes-correction-hooks-")
 	if err != nil {
 		return fmt.Errorf("prepare hook-free commit environment: %w", err)
@@ -191,6 +355,18 @@ func commitPipelineCorrectionWithCleanup(
 		}
 	}
 	return commitErr
+}
+
+// stagedChangesPresent is the handoff between catch-all staging and commit.
+// Worktree status can become stale when an agent completes a rebase itself, or
+// can report dirt that `git add -A` cannot put in the superproject index. Only
+// the staged index answers whether a correction commit is actually required.
+func stagedChangesPresent(gitRun gitRunner) (bool, error) {
+	staged, err := gitRun("diff", "--cached", "--name-only", "-z")
+	if err != nil {
+		return false, err
+	}
+	return staged != "", nil
 }
 
 func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string) error {
@@ -209,7 +385,11 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	}
 	if strings.TrimSpace(status) == "" {
 		sctx.Log("no agent changes to commit")
-		return false, nil
+		headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
+		if err != nil {
+			return false, fmt.Errorf("resolve agent head: %w", err)
+		}
+		return false, recordAgentFixHead(sctx, stepName, headSHA)
 	}
 	if summary == "" {
 		summary = fallbackSummary
@@ -217,12 +397,16 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if summary == "" {
 		summary = "apply fixes"
 	}
-	commitMessage, err := sctx.Config.Commit.RenderFixMessage(stepName, summary)
+	commitMessage, err := sctx.Config.Commit.RenderFixMessageForBranch(stepName, summary, sctx.Run.Branch)
 	if err != nil {
 		return false, fmt.Errorf("render %s fix commit message: %w", stepName, err)
 	}
 	if err := stagePipelineChanges(sctx); err != nil {
 		return false, fmt.Errorf("stage %s changes: %w", stepName, err)
+	}
+	headBeforeCommit, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return false, fmt.Errorf("resolve head before %s commit: %w", stepName, err)
 	}
 	if err := commitPipelineCorrection(ctx, sctx.WorkDir, commitMessage, sctx.Log); err != nil {
 		return false, fmt.Errorf("commit %s changes: %w", stepName, err)
@@ -231,33 +415,48 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err != nil {
 		return false, fmt.Errorf("resolve head after %s commit: %w", stepName, err)
 	}
-	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
+	// An empty staged index is a successful no-op, not a commit. Reporting it
+	// as one would claim a head advance that never happened.
+	if headSHA == headBeforeCommit {
+		sctx.Log("no staged agent changes to commit")
+	} else {
+		sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
+	}
+	if err := recordAgentFixHead(sctx, stepName, headSHA); err != nil {
 		return false, err
 	}
-	ref := normalizedBranchRef(sctx.Run.Branch)
-	if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, headSHA); err != nil {
-		return false, fmt.Errorf("update local branch ref: %w", err)
+	return headSHA != headBeforeCommit, nil
+}
+
+func recordAgentFixHead(sctx *pipeline.StepContext, stepName types.StepName, headSHA string) error {
+	if headSHA == sctx.Run.HeadSHA {
+		return nil
+	}
+	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
+		return err
+	}
+	if err := updateNonSharedBranchRef(sctx, headSHA); err != nil {
+		return err
 	}
 	startingHead := strings.TrimSpace(sctx.ReviewStartingHeadSHA)
 	if startingHead == "" {
 		startingHead = sctx.Run.HeadSHA
 	}
-	sctx.Run.HeadSHA = headSHA
 	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-		return false, err
+		return err
 	}
+	sctx.Run.HeadSHA = headSHA
 	if stepName == types.StepReview {
 		pipeline.PersistUncertifiedPipelineRange(sctx, startingHead, headSHA)
 	}
-	sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
-	return true, nil
+	return nil
 }
 
 func fixResultSummary(committed bool) string {
 	if committed {
 		return changesAppliedSummary
 	}
-	return noChangesAppliedSummary
+	return NoChangesAppliedSummary
 }
 
 func extractCommitSummary(result *agent.Result) (string, error) {
@@ -335,4 +534,37 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		return "", err
 	}
 	return fixResultSummary(committed), nil
+}
+
+func updateNonSharedBranchRef(sctx *pipeline.StepContext, headSHA string) error {
+	shared, err := worktreeSharesGateRefs(sctx)
+	if err != nil || shared {
+		return err
+	}
+	if _, err := stepGitRun(sctx, "update-ref", normalizedBranchRef(sctx.Run.Branch), headSHA); err != nil {
+		return fmt.Errorf("update local branch ref: %w", err)
+	}
+	return nil
+}
+
+func worktreeSharesGateRefs(sctx *pipeline.StepContext) (bool, error) {
+	if strings.TrimSpace(sctx.GateDir) == "" {
+		return false, nil
+	}
+	gateInfo, err := os.Stat(sctx.GateDir)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect gate ref storage: %w", err)
+	}
+	commonDir, err := stepGitRun(sctx, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return false, fmt.Errorf("resolve worktree ref storage: %w", err)
+	}
+	commonInfo, err := os.Stat(commonDir)
+	if err != nil {
+		return false, fmt.Errorf("inspect worktree ref storage: %w", err)
+	}
+	return os.SameFile(gateInfo, commonInfo), nil
 }

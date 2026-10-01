@@ -84,14 +84,22 @@ ci:
   rerun_transient: 0
   revalidate_repairs: false
 
+rebase:
+  strategy: rebase # or: merge
+
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
+  # branch_pattern: '^PROJ/([0-9]+)$'
+  # branch_replacement: 'PROJ-${1}'
+  # To use the captured identifier in the subject:
+  # fix_message: "{{.Branch}}: {{.Summary}}"
 
 intent:
   enabled: true
   threshold: 0.2
   slack_days: 3
   disabled_readers: []
+  # publish_intent: false # Keep the generated Intent section out of PR bodies by default
 
 test:
   evidence:
@@ -122,13 +130,13 @@ Default agent for all repos and setup-wizard suggestions. Can be overridden per-
 |         |                                                                                             |
 | ------- | ------------------------------------------------------------------------------------------- |
 | Type    | `string` or `string[]`                                                                      |
-| Values  | `auto`, `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity`, `cursor`, `acp:<target>` |
+| Values  | `auto`, `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity`, `cursor`, `devin`, `acp:<target>` |
 | Default | `auto`                                                                                      |
 
-`auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `grok`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, `antigravity`, then `cursor`.
-`cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`.
-With default paths, `auto` only selects it when both `cursor-agent` and `acpx` resolve; `acp_registry_overrides.cursor` and `acpx_path` replace those respective defaults during availability checks.
-`acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`; `acp:cursor` uses the same default command as `cursor`.
+`auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `grok`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, `antigravity`, `cursor`, then `devin`.
+`cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`, and `devin` is an ACP alias for the `devin` target with default command `devin acp`.
+With default paths, `auto` only selects an alias when both its command binary (`cursor-agent` or `devin`) and `acpx` resolve; `acp_registry_overrides.<target>` and `acpx_path` replace those respective defaults during availability checks.
+`acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`; `acp:cursor` and `acp:devin` use the same default commands as `cursor` and `devin`.
 Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: auto`.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
 If an explicit agent is unavailable, `auto` finds no native agent or ACP alias, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
@@ -141,7 +149,7 @@ agent: [codex, grok]
 ```
 
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
-After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` provide one fallback and preserve whichever spelling appears first.
+After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` (or `devin` and `acp:devin`) provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Fallback candidates share the invocation's existing bounded context and use only its remaining time; once that context expires or is cancelled, no further candidate is announced or started.
@@ -203,7 +211,7 @@ other native fixers do not need it; select them with `review_fixer_agent` alone.
 
 ### acpx_path
 
-Path to the user-installed `acpx` binary used for `agent: acp:<target>` and ACP aliases such as `agent: cursor`.
+Path to the user-installed `acpx` binary used for `agent: acp:<target>` and ACP aliases such as `agent: cursor` and `agent: devin`.
 
 |         |          |
 | ------- | -------- |
@@ -225,7 +233,7 @@ A bare name is resolved from the daemon's effective `PATH`; an explicit path is 
 
 Map an ACP target name to a raw ACP agent command.
 When `agent: acp:<target>` matches an override key, no-mistakes runs `acpx --agent <command>` instead of `acpx <target>`.
-ACP aliases use the same target keys. For example, `agent: cursor` and `agent: acp:cursor` resolve to the `cursor` target, so set `cursor` to override the default `cursor-agent acp` command.
+ACP aliases use the same target keys. For example, `agent: cursor` and `agent: acp:cursor` resolve to the `cursor` target, so set `cursor` to override the default `cursor-agent acp` command; `devin` likewise overrides the default `devin acp` command.
 Values are trimmed; a blank or whitespace-only value behaves as no override, so an alias keeps its default command.
 Availability checks always resolve `acpx_path`. They also probe the executable named first in the effective non-blank raw command when it is a bare command name or clean absolute path. Relative, quoted, or escaped raw commands are not pre-probed; `acpx` executes them from the worktree. These checks do not invoke the ACP target or test its credentials.
 
@@ -260,6 +268,14 @@ acp_registry_overrides:
 
 The wrapper disables discovered Pi extensions and explicitly loads only the no-mistakes gate extension for this ACP target. Normal model and authentication configuration remains available, so credentials are not copied, but models that depend on provider extensions are unsupported in this dedicated mode. Keep the trusted source checkout and its installed dependencies at that absolute path. Repeat the pinned install after updating the checkout's lockfile. The [environment reference](/no-mistakes/reference/environment/#no_mistakes_pi_structured_output) owns the opt-in variable's semantics. A valid gate reports an actionable extension error when the runtime dependencies are missing. A completed `structured_output` result is authoritative only when it is the exclusive final tool result; coissued, intervening, or subsequent work discards it and falls back to ordinary final-text schema validation.
 
+For `devin`, an override is also the way to select a model slug from `devin models list` that Devin does not advertise over ACP, since [`agent_config.devin.model`](#agent_config) accepts only ACP-advertised ids:
+
+```yaml
+agent: devin
+acp_registry_overrides:
+  devin: devin acp --model <slug>
+```
+
 ### agent_path_override
 
 Custom binary paths for native agents launched directly by no-mistakes.
@@ -291,7 +307,7 @@ Model and reasoning effort per agent, in one common spelling. no-mistakes maps e
 |         |                                                                                     |
 | ------- | ----------------------------------------------------------------------------------- |
 | Type    | `map[string]{model, effort}`                                                        |
-| Keys    | `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity`, `cursor`, `acp:<target>` |
+| Keys    | `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity`, `cursor`, `devin`, `acp:<target>` |
 | Default | Empty (every harness keeps its own defaults)                                        |
 
 ```yaml
@@ -320,17 +336,17 @@ How each field maps:
 | `copilot`         | `--model`                                     | `--effort`                        | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
 | `pi`              | `--model`                                     | `--thinking`                      | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
 | `opencode`        | session-message `model` (needs `provider/model`) | session-message `variant`      | provider-specific                                   |
-| `cursor`, `acp:*` | `acpx --model`                                | not expressible                   | -                                                   |
+| `cursor`, `devin`, `acp:*` | `acpx --model`                       | not expressible                   | -                                                   |
 | `rovodev`         | not expressible                               | not expressible                   | -                                                   |
 | `antigravity`     | not expressible                               | not expressible                   | -                                                   |
 
 `opencode` needs the `provider/model` form (for example `openai/gpt-5`) because its session API takes the provider and the model as separate fields; a bare model name is refused at config load rather than dropped. Both of its knobs travel in the session message, not in the launch command, because `opencode serve` exits with usage on an unknown flag.
 
-`rovodev` and `antigravity` have no mechanism no-mistakes can set - `acli rovodev serve` plus its REST session API take no model parameter, and the `agy` CLI parses flags strictly - so `agent_config` for them is a config error rather than a request that quietly does nothing. Reach for [`agent_args_override`](#agent_args_override) there if your build of the CLI accepts a flag. Reasoning effort is likewise unavailable for ACP targets: no-mistakes drives them through `acpx`, which exposes `--model` but no effort surface.
+`rovodev` and `antigravity` have no mechanism no-mistakes can set - `acli rovodev serve` plus its REST session API take no model parameter, and the `agy` CLI parses flags strictly - so `agent_config` for them is a config error rather than a request that quietly does nothing. Reach for [`agent_args_override`](#agent_args_override) there if your build of the CLI accepts a flag. Reasoning effort is likewise unavailable for ACP targets: no-mistakes drives them through `acpx`, which exposes `--model` but no effort surface. acpx also accepts only the model ids a target advertises over ACP; for `devin` that is a subset of `devin models list`, and [`acp_registry_overrides`](#acp_registry_overrides) is the escape hatch for the rest.
 
-`agent_config` is global-only. Like `agent_args_override`, it decides which model runs with your credentials, so an `agent_config` block in a repository's `.no-mistakes.yaml` is ignored.
+`agent_config` is global-only. Like `agent_args_override`, it decides which model runs with your credentials, so an `agent_config` block in a repository's `.no-mistakes.yaml` is ignored. For first-class ACP aliases, `cursor` and `acp:cursor` share a profile, as do `devin` and `acp:devin`: the selected spelling's entry wins when both are configured; otherwise the other spelling's entry applies. This also applies to review-agent profiles.
 
-**Precedence.** `agent_args_override` always wins. If a raw flag already pins a knob natively - for example, `-m`, `--model`, or a `-c`/`--config` assignment whose exact key is `model` or `model_reasoning_effort` for Codex, plus the other harnesses' `--effort`, `--reasoning-effort`, or `--thinking` forms - then `agent_config` does not emit its value for that knob. Text such as `model=` nested inside an unrelated option's value is not a pin. Any knob the raw flags leave alone still comes from `agent_config`, so adding `agent_config` to an existing configuration never changes the arguments that configuration already supplied:
+**Precedence for unpinned runs.** `agent_args_override` wins. Opt-in [per-run Pi profiles](#per-run-pi-profiles) have a separate, immutable selection contract. If a raw flag already pins a knob natively - for example, `-m`, `--model`, or a `-c`/`--config` assignment whose exact key is `model` or `model_reasoning_effort` for Codex, plus the other harnesses' `--effort`, `--reasoning-effort`, or `--thinking` forms - then `agent_config` does not emit its value for that knob. Text such as `model=` nested inside an unrelated option's value is not a pin. Any knob the raw flags leave alone still comes from `agent_config`, so adding `agent_config` to an existing configuration never changes the arguments that configuration already supplied:
 
 ```yaml
 agent_config:
@@ -342,6 +358,57 @@ agent_args_override:
     - -m
     - o3
 ```
+
+### Per-run Pi profiles
+
+Select a profile when creating a validation run, without editing global config:
+
+```sh
+no-mistakes axi run --intent "the user's goal" \
+  --model openai-codex/gpt-5.4 --effort high
+```
+
+`--model` and/or `--effort` opt in. Each explicit field overrides
+`agent_config.pi`; an omitted field inherits that global default. Both must
+resolve to nonempty values before a run starts. Use a provider-qualified model
+ID from Pi's catalog, not a bare name, URL, glob, or `:thinking` suffix.
+Supported effort spellings are `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+Availability, authentication, and model-specific reasoning support remain Pi's
+responsibility; no-mistakes does not inspect subscriptions or query quotas.
+
+A pin applies to **every pipeline duty**, including reviewer and fixer roles.
+The effective trusted agent selection must be Pi-only (no `auto`, non-Pi
+fallbacks, or non-Pi `review_agents`), including `agent` / fallbacks from the
+trusted default-branch `.no-mistakes.yaml`. That check runs before any active
+validation is cancelled. Pi role-specific model/effort values are
+superseded by the run pin. Native `--model`, `--provider`, `--models`,
+`--thinking` (including `--flag=value`), or `--` in
+`agent_args_override.pi` conflict at launch: move defaults to `agent_config.pi`
+rather than combining two selection mechanisms.
+
+The daemon resolves the values once and stores `runs.pi_profile` atomically
+with run creation. That field cannot be changed or cleared. Each invocation,
+retry, fresh review, resumed fixer, and daemon recovery uses that pin; later
+global model, effort, agent-chain, role, or raw selection-flag changes cannot
+replace it. Recovery still enforces trusted repository policies and refuses
+unusable configuration or a missing Pi binary rather than switching harnesses.
+The pin fixes selection parameters, not provider credentials, model-catalog
+contents, or other agent settings; credentials are never stored in it.
+
+Reattaching with omitted flags preserves the existing pin. Explicit fields must
+match it; a different profile requires a new run. The same rule binds nonce
+replays and receipt claims. `rerun --model ... --effort ...` selects a profile
+for a **new** run; without those flags a rerun uses current global configuration,
+not its predecessor's pin. Existing runs and all callers omitting both flags
+remain unpinned and keep the previous global-config behavior. Concurrent runs
+hold independent pins without modifying shared configuration.
+
+Structured AXI status and daemon run/receipt responses expose `pi_profile:
+{model, effort}` only for pinned runs. `no-mistakes stats --run <id>` shows that
+requested profile alongside per-invocation served-model and usage evidence;
+a pin is not a claim that a provider reported usage. These values stay local,
+not in remote analytics. The CLI checks daemon support before a fresh pinned
+submission, so an older daemon cannot silently launch it without a pin.
 
 ### review_agents
 
@@ -366,18 +433,60 @@ review_agents:
     effort: max
 ```
 
-The only role keys are `reviewer` and `fixer`. Each configured role requires one
+The role keys are `reviewer`, `fixer`, and their optional later-round overlays
+`reviewer_after_round` and `fixer_after_round`. Each configured role requires one
 explicit `agent` (the same harness names as `agent_config`; no `auto` or lists).
 Model and effort are optional and inherit `agent_config` for that harness when
 empty. Nonempty role values override that profile, but native
 `agent_args_override` flags still win. Model availability, credentials, and
 supported effort levels remain the harness/provider's responsibility.
 
+#### Later-round role overrides
+
+`reviewer_after_round` and `fixer_after_round` are opt-in overlays for long
+review loops, where the first pass is worth a stronger tier and later rounds are
+mostly re-checking a fix the stronger model already prescribed. Each takes the
+same `agent` / `model` / `effort` fields plus `after_round`: the number of
+leading rounds that stay on the base role. `after_round` defaults to `1`, so the
+overlay takes over from round 2.
+
+```yaml
+review_agents:
+  fixer:
+    agent: pi
+    model: anthropic-vertex/claude-opus-4-8
+  fixer_after_round:
+    agent: pi
+    model: google-vertex/gemini-3.8-flash
+    after_round: 2
+```
+
+Rounds 1 and 2 above run on the `fixer` profile; round 3 and every later round
+run on `fixer_after_round`. The direction is yours: point the overlay at a
+cheaper tier to stop long loops from spending at the top tier, or at a stronger
+one to escalate a loop that is not converging.
+
+Without these keys nothing changes - every round runs on the role it runs on
+today. They only select the harness for a round; they never change how many
+rounds happen, and `auto_fix` plus the gate remain the only things that bound
+the loop. The overlay applies to a round the pipeline numbered; an invocation
+outside a numbered round keeps the base role. Only the base roles accept plain
+`agent` / `model` / `effort` - setting `after_round` on `reviewer` or `fixer`, or
+a value below 1, is a configuration error. Because a later-round fixer may be a
+harness that cannot resume sessions, fixer session reuse is reported for every
+fixer a run can use: configuring a non-resumable `fixer_after_round` turns fix
+turns cold for the whole run rather than handing round 3 a session it cannot
+resume. `no-mistakes stats --run <id>` shows the agent and served model per
+invocation alongside its round, so which tier served which round is visible
+after the fact.
+
 Both roles can use the same harness with different models. Reviews and rereviews
 always run fresh; only review fixes reuse the fixer's session when
 `session_reuse` is enabled and the fixer supports it. These settings do not
-select the agents repairing tests, documentation, or CI. Eval capture strips
-these profiles so replay candidates remain authoritative.
+select the agents repairing tests, documentation, or CI. An opt-in
+[per-run Pi profile](#per-run-pi-profiles) supersedes these role values for
+that run. Eval capture strips these profiles so replay candidates remain
+authoritative.
 
 ### agent_args_override
 
@@ -446,7 +555,7 @@ agent_args_override:
 
 Do not put a model flag under `opencode` here: these flags go to `opencode serve`, which exits with usage on an unknown option. Use `agent_config.opencode.model` instead.
 
-For Codex, `service_tier` and reasoning effort tune different things: `service_tier` selects the speed or priority lane, while reasoning depth is what [`agent_config`](#agent_config)'s `effort` sets (as `-c model_reasoning_effort`). no-mistakes reloads global config while setting up each run, so edits made before `no-mistakes axi run` apply to that run. For repeatable profiles, use separately initialized `NM_HOME` directories; each has its own `config.yaml` and no-mistakes state.
+For Codex, `service_tier` and reasoning effort tune different things: `service_tier` selects the speed or priority lane, while reasoning depth is what [`agent_config`](#agent_config)'s `effort` sets (as `-c model_reasoning_effort`). no-mistakes reloads global config while setting up each run, so edits made before `no-mistakes axi run` apply to that run. An opt-in [per-run Pi profile](#per-run-pi-profiles) still keeps its pinned model and effort for that run's lifetime. For repeatable profiles, use separately initialized `NM_HOME` directories; each has its own `config.yaml` and no-mistakes state.
 
 ### forge_profiles
 
@@ -567,8 +676,17 @@ Raise it for repositories whose reviews legitimately run long; it bounds only th
 
 Maximum wall-clock time for one Test-step agent invocation.
 The budget covers the post-test evidence-gathering turn, and a Test-repair turn gets its own budget of the same length.
-When the deadline expires, the test agent is cancelled and the run fails with a diagnostic naming the timeout instead of remaining active indefinitely.
-That diagnostic carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
+When the deadline expires, the test agent is cancelled and the Test step parks for a decision with an ask-user finding rather than failing the run as a code defect.
+That finding carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
+A late structured result from the expired turn is still not used as a successful Test pass.
+The park keeps the configured `commands.test` result from the same execution, so approving over a failing command is still recorded as a configured-command override.
+A cut fix round also keeps the findings of the gate it was answering, selected or not, and the last completed evidence turn's verdict, so approving it is recorded against that verdict.
+A commit the timed-out agent already made is recorded locally for custody and is not pushed, unless an unfinished rebase or merge leaves only a partial HEAD.
+While the run worktree holds uncommitted changes or commits past the head the last completed evidence turn saw (before one completes, past the head the first cut measured from, which each later park carries forward and measures again), the park names them with the commands to inspect them and approval is refused, because the steps after Test would commit and publish them.
+Otherwise approving the park is a Test exception (`passed-with-override`), not a silent green pass.
+A fix response spends another budget: a repair turn runs only for selected findings other than the budget cut itself, then validation re-runs over whatever the cut left.
+Guidance you attach to the budget-cut finding itself (`axi respond --instructions`, or `e` in the TUI) is given to that re-run validation.
+You can also abort, raise this value, and retry.
 
 |         |                        |
 | ------- | ---------------------- |
@@ -577,7 +695,9 @@ That diagnostic carries the same measured evidence and adapter report described 
 
 Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `1h`, etc.
 Non-positive values are rejected when loading the global config.
-Raise it for repositories whose targeted tests or evidence gathering legitimately run long; it bounds only the Test step, and no other step or environment variable overrides it.
+Raise it for repositories whose targeted tests or evidence gathering legitimately run long; a suite that itself takes close to 30 minutes leaves almost no slack against provider slowness under the default.
+The shipped default stays a stall bound and is not raised automatically.
+It bounds only the Test step, and no other step or environment variable overrides it.
 
 ### daemon_connect_timeout
 
@@ -644,8 +764,9 @@ Per-run agent session reuse for the review loop's fixer role.
 | Type    | `bool` |
 | Default | `true` |
 
-When enabled and the effective review fixer supports native session resume (Claude or Grok via `--resume`, Codex via `exec resume`, Pi via `--session <UUID>`, Antigravity via `--conversation <id>`), each run keeps one durable fixer session across its review-fix turns. The fixer follows [`review_agents`](#review_agents) precedence, including the legacy dedicated fixer when no explicit fixer role is configured.
-Review turns - the initial full review and every full rereview - always run as fresh, session-free invocations regardless of this setting: a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
+When enabled and every fixer that can serve the run supports native session resume (Claude or Grok via `--resume`, Codex via `exec resume`, Pi via `--session <UUID>`, Antigravity via `--conversation <id>`), each run keeps one durable fixer session across its review-fix turns. A configured later-round fixer that cannot resume therefore makes all fixer turns cold for that run; see [later-round role overrides](#later-round-role-overrides).
+The fixer follows [`review_agents`](#review_agents) precedence, including the legacy dedicated fixer when no explicit fixer role is configured.
+Review turns - the initial full review and every full rereview - always run as fresh invocations regardless of this setting. They are also session-free, unless the run has a [review conversation](/no-mistakes/reference/repo-config/#reviewconversation) AND this setting is on, in which case one reviewer session spans exactly one review pass - the asking turn and the finalize turn that receives its answers - and never a code change; with `session_reuse: false` that finalize turn runs cold, which costs a re-read rather than the answers, because the finalize prompt is the complete review prompt plus the answers. Either way a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
 The fixer session is never lent to review turns, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
 When resume is unavailable or fails, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record. Pi emits per-invocation usage after a resume, unlike Codex's cumulative session counters.
 Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts; Pi's own session directory retains its native transcript. Keep Pi's session directory private, and keep any `--session-dir` or `PI_CODING_AGENT_SESSION_DIR` setting stable while a run is active so a daemon restart can find the fixer session.
@@ -743,21 +864,38 @@ ci:
 
 A value in the trusted repository config overrides this global value in both directions: an explicit repository `true` enables revalidation when this is `false`, and an explicit repository `false` disables opt-in revalidation when this is `true`. When the trusted repository config omits the key, this global value applies.
 
+### rebase.strategy
+
+The operator-level default for [`rebase.strategy`](/no-mistakes/reference/repo-config/#rebasestrategy), whose per-repository reference owns the semantics, the trade-off, and the trust boundary.
+
+| | |
+|---|---|
+| Type | `string` (`rebase` or `merge`) |
+| Default | `rebase` |
+
+```yaml
+rebase:
+  strategy: merge
+```
+
+A value in the trusted repository config overrides this global value in both directions. When the trusted repository config omits the key, this global value applies. An unrecognized value fails the config closed rather than falling back to the default, so a typo cannot quietly keep rewriting history a maintainer asked to stop rewriting.
+
 ### commit.fix_message
 
-Template for the subject of commits created by the Review, Test, Document, Lint, and CI repair paths.
+Template for the subject of commits created by the Review, Test, Document, Lint, and CI repair paths, plus operator-authorized repository gate repairs.
 
 | | |
 | --- | --- |
 | Type | `string` |
 | Default | `no-mistakes({{.Step}}): {{.Summary}}` |
 
-The template supports literal text and two Go-style placeholders:
+The template supports literal text and three Go-style placeholders:
 
 | Variable | Value |
 | --- | --- |
-| `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, `lint`, or `ci` |
+| `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, `lint`, `ci`, or `gate.test.mutation-budget` |
 | `{{.Summary}}` | Sanitized one-line summary returned by the fix agent, or the step's deterministic fallback summary |
+| `{{.Branch}}` | Normalized branch name, or the identifier captured and optionally transformed by [`commit.branch_pattern`](#commitbranch_pattern) and [`commit.branch_replacement`](#commitbranch_replacement) |
 
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
 The template source is limited to 1,024 bytes and 16 placeholders.
@@ -770,10 +908,78 @@ The final rendered subject is validated again, so unsafe characters in an agent-
 The setting does not change commit subjects created by the Rebase or Push steps.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.
 
+### commit.branch_pattern
+
+Optional regular expression for extracting the value exposed as `{{.Branch}}` to commit and PR title templates.
+
+| | |
+| --- | --- |
+| Type | `string` regular expression |
+| Default | Unset, so `{{.Branch}}` is the normalized full branch name |
+
+The expression is limited to 1,024 bytes, must be valid UTF-8, must exclude the same control and unsafe Unicode format characters as `commit.fix_message`, and must compile with exactly one capture group.
+Without [`commit.branch_replacement`](#commitbranch_replacement), that capture group becomes `{{.Branch}}`, so `([A-Z]+-[0-9]+)` extracts `PROJ-123` from `feature/PROJ-123-add-widget`.
+For example, this global configuration renders `PROJ-123: preserve legacy drafts` from branch `PROJ/123`:
+
+```yaml
+commit:
+  branch_pattern: '^PROJ/([0-9]+)$'
+  branch_replacement: 'PROJ-${1}'
+  fix_message: "{{.Branch}}: {{.Summary}}"
+```
+
+When a template uses `{{.Branch}}` and the pattern does not find a non-empty identifier, rendering fails safely instead of producing an empty prefix.
+A per-repo [`commit.branch_pattern`](/no-mistakes/reference/repo-config/#commitbranch_pattern) value overrides this global setting.
+
+### commit.branch_replacement
+
+Optional expression that adds literal text around the branch pattern's capture group before exposing it as `{{.Branch}}`. Set it under global `commit` for the machine-wide default, or under a matching [`repository_overrides`](#repository_overrides) entry for one remote. It is not available in a repository's `.no-mistakes.yaml`.
+
+| | |
+| --- | --- |
+| Type | `string` replacement expression |
+| Default | Unset, so the capture group is used unchanged |
+
+Use exactly one `${1}` reference to insert the capture group; other dollar syntax is rejected.
+Under global `commit`, the replacement must be configured with `commit.branch_pattern` in that block. Under `repository_overrides`, pair it with `commit.branch_pattern` in the same remote entry.
+It is limited to 1,024 bytes, must be valid UTF-8, and must exclude the same control and unsafe Unicode format characters as `commit.fix_message`.
+Malformed replacement syntax fails configuration loading with an actionable error.
+The expanded identifier is subject to the existing UTF-8, control-character, unsafe-Unicode, and rendered-subject validation.
+A `commit.branch_pattern` in `.no-mistakes.yaml` takes precedence and clears any inherited machine-wide replacement, including one from a matching repository override, so a replacement cannot be applied to a different pattern.
+
+### repository_overrides
+
+Machine-local settings scoped to one repository by remote host and full repository path.
+This lets one machine apply ticket conventions to a single repository without adding settings to that repository.
+Remote hosts are matched case-insensitively.
+HTTP, HTTPS, SSH, and Git-protocol URLs, plus scp-style remotes, are accepted; the transport scheme is not part of the match.
+A URL's scheme-default port (80, 443, 22, or 9418 for HTTP, HTTPS, SSH, or Git) matches an omitted port; non-default ports remain distinct.
+IPv6 addresses are canonicalized, with bracket boundaries preserved so a port cannot be confused with address text.
+For `github.com`, `gitlab.com`, and `bitbucket.org`, repository paths are also matched case-insensitively and without a trailing `.git`, across equivalent HTTPS, SSH URL, and scp-style remotes.
+On every other host, repository path case and a trailing `.git` are significant.
+GitLab subgroup paths are preserved.
+On other SSH hosts, rooted paths (`host:/...` or `ssh://host/...`) remain distinct from home-relative scp paths (`host:...`).
+
+```yaml
+repository_overrides:
+  https://github.com/acme/widget.git:
+    commit:
+      branch_pattern: '([A-Z]+-[0-9]+)'
+      fix_message: '{{.Branch}}: {{.Summary}}'
+    pr:
+      title_format: '{{.Branch}}: {{.Title}}'
+```
+
+Supported fields are `commit.branch_pattern`, `commit.branch_replacement`, `commit.fix_message`, and `pr.title_format`; each retains the same fail-closed validation as its global or repository-config equivalent.
+A `commit.branch_replacement` must be paired with `commit.branch_pattern` in the same override.
+Precedence is explicit: `.no-mistakes.yaml` wins for every field it sets, then a matching machine-local override, then the plain global value, then the built-in default.
+As with the global replacement, a repository `commit.branch_pattern` replaces the matching machine-local pattern and clears its replacement.
+Repositories matching no block keep existing global and built-in behavior.
+
 ### intent
 
 Transcript-based user-intent extraction settings.
-When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, pass that summary to rebase, review, test, document, lint, CI auto-fix, and PR prompts, and include it in generated PR descriptions.
+When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, and pass that summary to rebase, review, test, document, lint, CI auto-fix, repository gate repair, and PR prompts. For publication of the generated Intent section, see [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 
 |      |          |
 | ---- | -------- |
@@ -785,8 +991,11 @@ When enabled and no intent was supplied directly for the run, no-mistakes can re
 | `intent.threshold`        | `float`    | `0.2`   | Minimum raw match score for selecting a transcript session |
 | `intent.slack_days`       | `int`      | `3`     | Extra days to look back before the change window           |
 | `intent.disabled_readers` | `string[]` | Empty   | Transcript readers to disable                              |
+| `intent.publish_intent`   | `bool`     | `true`  | Publish the generated Intent section on PR bodies by default |
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
+
+`intent.publish_intent: false` is a global, operator-side default that keeps the generated `## Intent` section out of the PR body for runs started without an explicit override. It is the caller-side counterpart of the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent): both are tighten-only, the repository's trusted policy remains the ceiling a caller can never exceed, and review, test, document, lint, and CI auto-fix prompts keep the full intent. Under the caller-side omission the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; the intent is withheld from them, never scanned out of their output. A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes. This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
 
 The match score is the share of matching files mentioned in a transcript session; deleted files are ignored when the diff also contains non-deleted changes.
 All-deletion diffs still match against the deleted changed files.

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -187,6 +189,50 @@ func TestExecutor_RestartsValidationFromRequestedStep(t *testing.T) {
 		if rounds[0].Round != 1 || rounds[1].Round != 2 {
 			t.Errorf("%s rounds = %v, want [1 2]", result.StepName, roundNumbers(rounds))
 		}
+	}
+}
+
+func TestExecutor_RevalidationClearsReviewCarry(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	reviewCalls := 0
+	review := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		reviewCalls++
+		if reviewCalls == 1 {
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"review-1","severity":"warning","description":"review needed","action":"ask-user"}],"summary":"review needed"}`,
+			}, nil
+		}
+		return &StepOutcome{}, nil
+	}}
+	ciCalls := 0
+	ci := &adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
+		ciCalls++
+		if ciCalls == 1 {
+			return &StepOutcome{RestartFrom: types.StepReview}, nil
+		}
+		return &StepOutcome{}, nil
+	}}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{review, ci}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("approve initial review: %v", err)
+	}
+	waitExecutorDone(t, done)
+
+	if reviewCalls != 2 || ciCalls != 2 {
+		t.Fatalf("calls = review %d, ci %d; want two each", reviewCalls, ciCalls)
+	}
+	completed, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, want %s", completed.Status, types.RunCompleted)
 	}
 }
 
@@ -410,6 +456,32 @@ func TestExecutor_StepError_FailsRun(t *testing.T) {
 	}
 	if dbSteps[2].Status != types.StepStatusPending {
 		t.Errorf("step lint: expected %q, got %q", types.StepStatusPending, dbSteps[2].Status)
+	}
+}
+
+func TestExecutor_OutOfMemoryFailureReasonKeepsRestorationDetail(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	const snapshot = "/tmp/nm-recovery-snapshot"
+	stepErr := errors.Join(
+		fmt.Errorf("run prepare command: %w", shellenv.ErrOutOfMemory),
+		fmt.Errorf("restore pre-preparation changes; recovery snapshot retained at %s: %w", snapshot, errors.New("git stash apply failed")),
+	)
+
+	exec := NewExecutor(database, p, nil, nil, []Step{newFailStep(types.StepTest, stepErr)}, nil)
+	err := exec.Execute(context.Background(), run, repo, t.TempDir())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	dbSteps, _ := database.GetStepsByRun(run.ID)
+	if dbSteps[0].Error == nil {
+		t.Fatal("failed step has no recorded reason")
+	}
+	reason := *dbSteps[0].Error
+	for _, want := range []string{"git stash apply failed", snapshot, shellenv.ErrOutOfMemory.Error()} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("step failure reason %q is missing %q", reason, want)
+		}
 	}
 }
 
