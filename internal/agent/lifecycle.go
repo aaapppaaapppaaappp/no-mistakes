@@ -16,6 +16,9 @@ const (
 	// LifecyclePhaseFallback marks any fallback before a fresh agent attempt,
 	// including provider, session-resume, and structured-output fallbacks.
 	LifecyclePhaseFallback = "fallback"
+	// LifecyclePhaseWarning records bounded, non-sensitive protocol evidence
+	// that did not invalidate the invocation.
+	LifecyclePhaseWarning = "warning"
 	// LifecyclePhaseActivity marks observed liveness of a running native
 	// subprocess: bytes arrived on its stdout or stderr.
 	//
@@ -100,6 +103,10 @@ func emitAgentFallback(opts RunOpts, current, next string, err error) {
 		Phase:   LifecyclePhaseFallback,
 		Message: fmt.Sprintf("agent %s failed (%s); falling back to %s", current, fallbackReason(err), next),
 	})
+}
+
+func emitAgentWarning(opts RunOpts, name, message string) {
+	emitAgentControl(opts, LifecycleEvent{Agent: name, Phase: LifecyclePhaseWarning, Message: message})
 }
 
 func emitAgentControl(opts RunOpts, event LifecycleEvent) {

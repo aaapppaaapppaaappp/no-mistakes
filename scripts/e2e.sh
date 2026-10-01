@@ -59,9 +59,11 @@ trap 'reap_inventory; if [[ "${OWNED_INVENTORY}" -eq 1 ]]; then rm -rf "$NM_E2E_
 # Default args match the historical Makefile e2e target; callers may override.
 if [[ "$#" -eq 0 ]]; then
   # The user-journey matrix runs native backends serially because each case
-  # owns process-wide environment. Four backends plus the remaining package
-  # journeys no longer fit the historical five-minute package budget.
-  set -- -tags=e2e -count=1 -timeout 480s ./internal/e2e/... ./internal/pipeline/steps/...
+  # owns process-wide environment. The baseline suite already exhausts the
+  # obsolete eight-minute aggregate package budget (TestUserJourney alone was
+  # measured at ~286s). Keep a finite package ceiling for hung-test detection,
+  # with enough aggregate headroom for the unchanged per-operation deadlines.
+  set -- -tags=e2e -count=1 -timeout 15m ./internal/e2e/... ./internal/pipeline/steps/...
 fi
 
 go test "$@"

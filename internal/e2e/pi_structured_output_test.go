@@ -3,20 +3,26 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -166,6 +172,315 @@ exec %q -e %q --provider no-mistakes-fixture --model structured-output --no-sess
 		t.Fatalf("result text = %q, want terminating tool JSON", res.Text)
 	}
 	t.Logf("ACP/Pi terminating structured output: %s", res.Text)
+}
+
+func TestAcpxPiStrictResponsesGateRepairsWithinOneAttempt(t *testing.T) {
+	integrationPath, err := filepath.Abs(filepath.Join("..", "..", "integrations", "pi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(integrationPath, "node_modules", ".bin")
+	realAcpx := filepath.Join(binDir, "acpx")
+	piACP := filepath.Join(binDir, "pi-acp")
+	for _, path := range []string{realAcpx, filepath.Join(binDir, "pi"), piACP} {
+		if info, statErr := os.Stat(path); statErr != nil || info.IsDir() {
+			t.Fatalf("pinned executable %s is missing; run npm ci --prefix integrations/pi --ignore-scripts", path)
+		}
+	}
+
+	var requests atomic.Int32
+	requestBody := make(chan []byte, 3)
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber := requests.Add(1)
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			t.Errorf("read provider request: %v", readErr)
+		}
+		select {
+		case requestBody <- body:
+		default:
+		}
+		if r.URL.Path != "/v1/responses" {
+			t.Errorf("provider path = %q, want Responses endpoint", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		arguments := `{"summary":"through-responses"}`
+		item := map[string]any{
+			"type": "function_call", "id": "fc_fixture", "call_id": "call_fixture",
+			"name": "structured_output", "arguments": arguments, "status": "completed",
+		}
+		output := []any{item}
+		if requestNumber == 1 {
+			// The first provider turn settles without the required call. The Pi
+			// extension must inject one fixed repair nudge into this SAME session,
+			// not make acpx/no-mistakes start a fresh attempt.
+			output = []any{}
+		}
+		response := map[string]any{
+			"id": "resp_fixture", "object": "response", "status": "completed",
+			"output": output, "error": nil, "incomplete_details": nil,
+			"usage": map[string]any{
+				"input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+				"input_tokens_details":  map[string]any{"cached_tokens": 0},
+				"output_tokens_details": map[string]any{"reasoning_tokens": 2},
+			},
+		}
+		writeSSE := func(event string, data any) {
+			encoded, marshalErr := json.Marshal(data)
+			if marshalErr != nil {
+				t.Errorf("marshal SSE: %v", marshalErr)
+				return
+			}
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
+		}
+		writeSSE("response.created", map[string]any{"type": "response.created", "response": response})
+		if requestNumber > 1 {
+			writeSSE("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{
+				"type": "function_call", "id": "fc_fixture", "call_id": "call_fixture",
+				"name": "structured_output", "arguments": "", "status": "in_progress",
+			}})
+			writeSSE("response.function_call_arguments.done", map[string]any{
+				"type": "response.function_call_arguments.done", "output_index": 0,
+				"item_id": "fc_fixture", "arguments": arguments,
+			})
+			writeSSE("response.output_item.done", map[string]any{
+				"type": "response.output_item.done", "output_index": 0, "item": item,
+			})
+		}
+		writeSSE("response.completed", map[string]any{"type": "response.completed", "response": response})
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer provider.Close()
+
+	dir := t.TempDir()
+	acpxEvents := filepath.Join(dir, "acpx-events.jsonl")
+	acpx := filepath.Join(dir, "acpx-capture")
+	acpxScript := fmt.Sprintf("#!/bin/bash\nset -o pipefail\n%q \"$@\" | tee %q\n", realAcpx, acpxEvents)
+	if err := os.WriteFile(acpx, []byte(acpxScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "source-agent")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	models := fmt.Sprintf(`{
+  "providers": {"no-mistakes-flash-next-responses": {
+    "baseUrl": %q, "apiKey": "credential-neutral-fixture", "api": "openai-responses",
+    "compat": {"supportsStrictMode": true},
+    "models": [{
+      "id": "Qwen/Qwen3.8-Flash-Next-FP8", "reasoning": true,
+      "thinkingLevelMap": {"off": null, "xhigh": "xhigh"},
+      "contextWindow": 262144, "maxTokens": 4096,
+      "samplingParams": {"temperature": 1.0, "top_p": 0.95, "seed": 424242}
+    }]
+  }}
+}`, provider.URL+"/v1")
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(models), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	piStarts := filepath.Join(dir, "pi-starts")
+	countingWrapper := filepath.Join(dir, "pi-no-mistakes-flash-next-responses-acp")
+	dedicatedWrapper := filepath.Join(integrationPath, "bin", "pi-no-mistakes-flash-next-responses-acp")
+	wrapperScript := fmt.Sprintf("#!/bin/sh\nprintf x >> %q\nexec %q \"$@\"\n", piStarts, dedicatedWrapper)
+	if err := os.WriteFile(countingWrapper, []byte(wrapperScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	rawCommand := fmt.Sprintf(
+		"env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=%s %s",
+		countingWrapper, piACP,
+	)
+	a, err := agent.NewWithOptions(types.AgentName("acp:pi-flash-next-responses-gate"), acpx, nil, agent.Options{
+		ACPRegistryOverrides: map[string]string{"pi-flash-next-responses-gate": rawCommand},
+		Profile:              agentcfgProfile("no-mistakes-flash-next-responses/Qwen/Qwen3.8-Flash-Next-FP8"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	attempts := 0
+	schema := json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","enum":["through-responses"]}},"required":["summary"],"additionalProperties":false}`)
+	res, err := a.Run(ctx, agent.RunOpts{
+		Prompt:     "Return the fixture result",
+		CWD:        dir,
+		Env:        []string{"HOME=" + dir, "PI_CODING_AGENT_DIR=" + agentDir},
+		JSONSchema: schema,
+		OnChunk:    func(text string) { t.Logf("ACP assistant chunk: %q", text) },
+		OnAttempt:  func(agent.Attempt) { attempts++ },
+	})
+	if err != nil {
+		events, _ := os.ReadFile(acpxEvents)
+		t.Fatalf("strict Responses process integration: %v (provider requests=%d)\n%s", err, requests.Load(), events)
+	}
+	if res.Text != `{"summary":"through-responses"}` {
+		t.Fatalf("result = %q", res.Text)
+	}
+	firstBody := <-requestBody
+	body := <-requestBody
+	if bytes.Equal(firstBody, body) {
+		t.Fatal("repair provider turn repeated the original payload instead of continuing the same session with a nudge")
+	}
+	var firstPayload map[string]any
+	if err := json.Unmarshal(firstBody, &firstPayload); err != nil {
+		t.Fatalf("decode initial provider request: %v\n%s", err, firstBody)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode provider request: %v\n%s", err, body)
+	}
+	repairNudge := "FORMAT_REPAIR_REQUIRED: No completed structured_output call was received. Do not repeat analysis. Do not output prose. Call structured_output exactly once with every required field."
+	if jsonValueContainsString(firstPayload["input"], repairNudge) || !jsonValueContainsString(payload["input"], repairNudge) {
+		t.Fatalf("fixed repair nudge was not delivered only on the continuation request: initial=%s repair=%s", firstBody, body)
+	}
+	firstSessionID, firstHasSessionID := firstPayload["prompt_cache_key"].(string)
+	repairSessionID, repairHasSessionID := payload["prompt_cache_key"].(string)
+	if !firstHasSessionID || firstSessionID == "" || !repairHasSessionID || repairSessionID != firstSessionID {
+		t.Fatalf("provider session identity changed across repair: initial=%q repair=%q", firstSessionID, repairSessionID)
+	}
+	tools, ok := payload["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v, want one", payload["tools"])
+	}
+	tool := tools[0].(map[string]any)
+	if payload["tool_choice"] != "required" || payload["parallel_tool_calls"] != false ||
+		payload["model"] != "Qwen/Qwen3.8-Flash-Next-FP8" || tool["name"] != "structured_output" || tool["strict"] != true {
+		t.Fatalf("provider request lost strict gate fields: %s", body)
+	}
+	reasoning := payload["reasoning"].(map[string]any)
+	if reasoning["effort"] != "xhigh" || payload["temperature"] != float64(1) ||
+		payload["top_p"] != 0.95 || payload["seed"] != float64(424242) {
+		t.Fatalf("provider request lost model/effort/sampling pins: %s", body)
+	}
+	starts, err := os.ReadFile(piStarts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := os.ReadFile(acpxEvents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acpPrompts := bytes.Count(events, []byte(`"method":"session/prompt"`))
+	if requests.Load() != 2 || string(starts) != "x" || attempts != 1 || acpPrompts != 1 {
+		t.Fatalf("provider requests=%d Pi processes=%q no-mistakes attempts=%d ACP prompts=%d; want two turns in one process/attempt/session", requests.Load(), starts, attempts, acpPrompts)
+	}
+	sum := sha256.Sum256(schema)
+	t.Logf("strict Responses result=%s provider_requests=%d pi_processes=%d no_mistakes_attempts=%d acp_prompts=%d same_session=true fixed_repair_nudge=true", res.Text, requests.Load(), len(starts), attempts, acpPrompts)
+	t.Logf("strict Responses repaired request sha256=%x schema sha256=%x", sha256.Sum256(body), sum)
+}
+
+func TestAcpxPiStrictResponsesRouteDriftCannotReachProvider(t *testing.T) {
+	integrationPath, err := filepath.Abs(filepath.Join("..", "..", "integrations", "pi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(integrationPath, "node_modules", ".bin")
+	realAcpx := filepath.Join(binDir, "acpx")
+	piACP := filepath.Join(binDir, "pi-acp")
+	for _, path := range []string{realAcpx, filepath.Join(binDir, "pi"), piACP} {
+		if info, statErr := os.Stat(path); statErr != nil || info.IsDir() {
+			t.Fatalf("pinned executable %s is missing; run npm ci --prefix integrations/pi --ignore-scripts", path)
+		}
+	}
+
+	var requests atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unexpected strict route request", http.StatusBadRequest)
+	}))
+	defer provider.Close()
+
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "source-agent")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	models := fmt.Sprintf(`{
+  "providers": {"no-mistakes-flash-next-responses": {
+    "baseUrl": %q, "apiKey": "credential-neutral-fixture", "api": "openai-responses",
+    "compat": {"supportsStrictMode": true},
+    "models": [{
+      "id": "Qwen/Qwen3.8-Flash-Next-FP8", "reasoning": true,
+      "thinkingLevelMap": {"off": null, "xhigh": "xhigh"},
+      "contextWindow": 262144, "maxTokens": 4096,
+      "samplingParams": {"temperature": 0.2, "top_p": 0.95, "seed": 424242}
+    }]
+  }}
+}`, provider.URL+"/v1")
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(models), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	piStarts := filepath.Join(dir, "pi-starts")
+	countingWrapper := filepath.Join(dir, "pi-no-mistakes-flash-next-responses-acp")
+	dedicatedWrapper := filepath.Join(integrationPath, "bin", "pi-no-mistakes-flash-next-responses-acp")
+	wrapperScript := fmt.Sprintf("#!/bin/sh\nprintf x >> %q\nexec %q \"$@\"\n", piStarts, dedicatedWrapper)
+	if err := os.WriteFile(countingWrapper, []byte(wrapperScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	rawCommand := fmt.Sprintf(
+		"env NO_MISTAKES_PI_STRUCTURED_OUTPUT=1 NO_MISTAKES_ACPX_ATTEMPTS=1 PI_ACP_PI_COMMAND=%s %s",
+		countingWrapper, piACP,
+	)
+	a, err := agent.NewWithOptions(types.AgentName("acp:pi-flash-next-responses-gate"), realAcpx, nil, agent.Options{
+		ACPRegistryOverrides: map[string]string{"pi-flash-next-responses-gate": rawCommand},
+		Profile:              agentcfgProfile("no-mistakes-flash-next-responses/Qwen/Qwen3.8-Flash-Next-FP8"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = a.Run(ctx, agent.RunOpts{
+		Prompt:     "Return the fixture result",
+		CWD:        dir,
+		Env:        []string{"HOME=" + dir, "PI_CODING_AGENT_DIR=" + agentDir},
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}`),
+	})
+	if err == nil {
+		t.Fatal("strict route drift unexpectedly completed")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("provider requests = %d, want route drift to abort before HTTP", requests.Load())
+	}
+	starts, readErr := os.ReadFile(piStarts)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(starts) != "x" {
+		t.Fatalf("Pi process starts = %q, want one executable process", starts)
+	}
+	t.Logf("strict Responses route drift rejected=true provider_requests=%d pi_processes=%d", requests.Load(), len(starts))
+}
+
+func agentcfgProfile(model string) agentcfg.Profile {
+	return agentcfg.Profile{Model: model}
+}
+
+func jsonValueContainsString(value any, want string) bool {
+	switch value := value.(type) {
+	case string:
+		return value == want
+	case []any:
+		for _, item := range value {
+			if jsonValueContainsString(item, want) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range value {
+			if jsonValueContainsString(item, want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestPiStructuredOutputExtensionLoadsInPiRPC(t *testing.T) {
