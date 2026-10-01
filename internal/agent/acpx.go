@@ -36,12 +36,30 @@ type acpxAgent struct {
 	// mechanism that reaches the target agent; empty leaves the target on its
 	// configured default, exactly as before the common layer existed.
 	model string
+	// disableProjectSettings is the resolved, trusted-only opt-out. For the omp
+	// target it switches the launch to a neutralized `omp acp` command (see
+	// ompgate.go); other targets ignore it and are refused by
+	// EnsureGateNeutralized when the opt-out is on.
+	disableProjectSettings bool
+	// overlayOnce guards a single lazy write of the omp neutralization overlay;
+	// overlayPath/overlayErr carry its result across resumed invocations.
+	overlayOnce sync.Once
+	overlayPath string
+	overlayErr  error
 	subprocessContext
 }
 
 func (a *acpxAgent) Name() string { return "acp:" + a.target }
 
 func (a *acpxAgent) ReportsAgentAttempts() bool { return true }
+
+// NeutralizesGateInstructions reports whether this acpx invocation launches its
+// target with the target repository's project instructions neutralized. Only
+// the omp target under the trusted opt-out (and only its default launch)
+// qualifies; see neutralizesOMPGate.
+func (a *acpxAgent) NeutralizesGateInstructions() bool {
+	return neutralizesOMPGate(a.target, a.rawCommand, a.disableProjectSettings)
+}
 
 func (a *acpxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, a.Name(), opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
@@ -60,7 +78,11 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	}
 	defer cleanupSchema()
 
-	args := a.buildArgs(opts)
+	rawCommand, err := a.resolveRawCommand()
+	if err != nil {
+		return nil, fmt.Errorf("acpx omp gate neutralization: %w", err)
+	}
+	args := a.buildArgs(rawCommand, opts)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	// Always override ambient transport values. Only this invocation's exact
@@ -107,13 +129,19 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 
 	var usage TokenUsage
 	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage, len(opts.JSONSchema) > 0 && structuredOutputEnabled)
+	// Estimate before any return, not just the success one: acpx can report an
+	// input-only usage event and then fail, and a reported usage with no output
+	// count would otherwise record the text it did stream as a reported zero.
+	if usage.OutputTokens == 0 {
+		usage.OutputTokens = estimateAcpxTokens(len(text))
+	}
 	if err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		err = errors.Join(err, acpxStdinError(<-stdinErrCh))
 		retErr := fmt.Errorf("acpx parse events: %w", err)
 		emitAgentExited(opts, a.Name(), pid, retErr)
-		return nil, retErr
+		return resultFromUsage(usage), retErr
 	}
 	waitErr := started.wait()
 	stderrWG.Wait()
@@ -121,17 +149,14 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	if waitErr != nil {
 		retErr := fmt.Errorf("acpx exited: %w: %s", errors.Join(waitErr, stdinErr), acpxProcessErrorOutput(stderrBuf, stdoutErr))
 		emitAgentExited(opts, a.Name(), pid, retErr)
-		return nil, retErr
+		return resultFromUsage(usage), retErr
 	}
 	if stdinErr != nil {
 		if out := acpxProcessErrorOutput(stderrBuf, stdoutErr); out != "" {
 			stdinErr = fmt.Errorf("%w: %s", stdinErr, out)
 		}
 		emitAgentExited(opts, a.Name(), pid, stdinErr)
-		return nil, stdinErr
-	}
-	if usage.OutputTokens == 0 {
-		usage.OutputTokens = estimateAcpxTokens(len(text))
+		return resultFromUsage(usage), stdinErr
 	}
 	res, err := finalizeTextResult(a.Name(), text, opts.JSONSchema, usage)
 	emitAgentExited(opts, a.Name(), pid, err)
@@ -141,8 +166,6 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 func acpxStructuredOutputOptedIn(rawCommand string) bool {
 	return strings.HasPrefix(strings.TrimSpace(rawCommand), "env "+acpxStructuredOutputEnvVar+"=1 ")
 }
-
-func (a *acpxAgent) Close() error { return nil }
 
 func createACPXSchemaTransport(schema json.RawMessage) (string, func(), error) {
 	if len(schema) == 0 {
@@ -203,10 +226,34 @@ func createACPXSchemaTransport(schema json.RawMessage) (string, func(), error) {
 	return path, cleanup, nil
 }
 
-func (a *acpxAgent) buildArgs(opts RunOpts) []string {
+func (a *acpxAgent) Close() error {
+	if a.overlayPath != "" {
+		_ = os.Remove(a.overlayPath)
+	}
+	return nil
+}
+
+// resolveRawCommand returns the acpx --agent raw command for this invocation.
+// For a neutralized omp gate run it lazily writes the suppression overlay once
+// and returns the neutralized `omp acp` command; otherwise it returns the
+// configured raw command unchanged.
+func (a *acpxAgent) resolveRawCommand() (string, error) {
+	if !a.NeutralizesGateInstructions() {
+		return a.rawCommand, nil
+	}
+	a.overlayOnce.Do(func() {
+		a.overlayPath, a.overlayErr = writeOMPGateOverlay()
+	})
+	if a.overlayErr != nil {
+		return "", a.overlayErr
+	}
+	return ompNeutralizedACPCommand(a.overlayPath), nil
+}
+
+func (a *acpxAgent) buildArgs(rawCommand string, opts RunOpts) []string {
 	args := make([]string, 0, 12)
-	if a.rawCommand != "" {
-		args = append(args, "--agent", a.rawCommand)
+	if rawCommand != "" {
+		args = append(args, "--agent", rawCommand)
 	}
 	if opts.CWD != "" {
 		args = append(args, "--cwd", opts.CWD)
@@ -223,7 +270,7 @@ func (a *acpxAgent) buildArgs(opts RunOpts) []string {
 	if a.model != "" {
 		args = append(args, "--model", a.model)
 	}
-	if a.rawCommand == "" {
+	if rawCommand == "" {
 		args = append(args, a.target)
 	}
 	args = append(args, "exec", "--file", "-")
@@ -309,6 +356,9 @@ type acpxUsageFields struct {
 	cacheCreationReported         bool
 }
 
+// parseAcpxJSONEvents streams acpx's JSON events and returns the assistant
+// text accumulated so far, on its error paths too, so a turn that fails partway
+// can still account for the output acpx already produced.
 func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, acceptStructuredOutput ...bool) (string, string, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), acpxScannerMaxTokenSize)
@@ -324,7 +374,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return "", stdoutErr, ctx.Err()
+			return output.String(), stdoutErr, ctx.Err()
 		default:
 		}
 
@@ -421,7 +471,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return "", stdoutErr, err
+		return output.String(), stdoutErr, err
 	}
 	if structuredOutput != "" {
 		return structuredOutput, stdoutErr, nil
