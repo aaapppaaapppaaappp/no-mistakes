@@ -82,11 +82,25 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 	}
 }
 
+// ConfigureCooperativeShellCommand is identical to ConfigureShellCommand on
+// Unix, where every configured process group already receives SIGTERM first.
+func ConfigureCooperativeShellCommand(cmd *exec.Cmd) {
+	ConfigureShellCommand(cmd)
+}
+
 // StartShellCommand starts cmd after ConfigureShellCommand has prepared its
 // process-group lifecycle. Unix needs no extra setup beyond cmd.Start, but the
 // wrapper keeps call sites aligned with Windows job-object setup.
 func StartShellCommand(cmd *exec.Cmd) error {
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// The parent raises the child's score (inherited by grandchildren) so a later
+	// cgroup OOM prefers this step over the daemon. Linux only; a no-op elsewhere.
+	if cmd.Process != nil {
+		RaiseStepOOMScore(cmd.Process.Pid)
+	}
+	return nil
 }
 
 // TerminateShellCommandGroup terminates the whole process group led by a

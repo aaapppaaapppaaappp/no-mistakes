@@ -275,6 +275,13 @@ const (
 	ActionFix     ApprovalAction = "fix"
 	ActionSkip    ApprovalAction = "skip"
 	ActionAbort   ApprovalAction = "abort"
+	// ActionAnswer releases a review gate that parked on the reviewer's own
+	// open questions, once every one of them is answered. It is neither a
+	// verdict on the round nor a request to fix anything: the same reviewer
+	// session is resumed with the answers so it can finish its pass. It is
+	// never a valid response to any other gate - the daemon sends it, not an
+	// operator (see docs concepts/review-conversation).
+	ActionAnswer ApprovalAction = "answer"
 )
 
 // AgentName identifies a supported agent backend. Explicit ACP targets use
@@ -291,6 +298,7 @@ const (
 	AgentPi          AgentName = "pi"
 	AgentCopilot     AgentName = "copilot"
 	AgentCursor      AgentName = "cursor"
+	AgentDevin       AgentName = "devin"
 	AgentAntigravity AgentName = "antigravity"
 )
 
@@ -303,6 +311,7 @@ type ACPAlias struct {
 
 var acpAliases = []ACPAlias{
 	{Name: AgentCursor, Target: "cursor", DefaultCommand: "cursor-agent acp"},
+	{Name: AgentDevin, Target: "devin", DefaultCommand: "devin acp"},
 }
 
 // ACPAliasFor returns the ACP alias metadata for a first-class agent name.

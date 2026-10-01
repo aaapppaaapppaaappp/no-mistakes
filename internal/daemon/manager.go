@@ -28,10 +28,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 	"github.com/kunchenguid/no-mistakes/internal/worktrees"
 )
 
@@ -245,7 +247,7 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	trustedRepoCfg := loadTrustedRepoConfig(ctx, workDir, trustedSHA, run.ID)
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
-	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
 	// Gates are read back from the run, never re-resolved. Everything else here
 	// is deliberately re-read from the live default branch, but a gate decides
 	// which steps the run HAS: the default branch may have gained or lost one
@@ -339,7 +341,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		return nil, err
 	}
 	roles := make(map[string]agent.Agent, len(cfg.ReviewAgents))
-	for _, role := range []string{"reviewer", "fixer"} {
+	for _, role := range config.ReviewAgentRoles {
 		entry, ok := cfg.ReviewAgents[role]
 		if !ok {
 			continue
@@ -354,7 +356,18 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		}
 		roles[role] = next
 	}
-	return agent.WithReviewAgents(primary, roles["reviewer"], roles["fixer"]), nil
+	return agent.WithReviewRoles(primary, agent.ReviewRoles{
+		Reviewer: agent.RoundedRole{
+			Agent:    roles[config.RoleReviewer],
+			Late:     roles[config.RoleReviewerAfterRound],
+			LateFrom: cfg.ReviewAgentTakeoverRound(config.RoleReviewerAfterRound),
+		},
+		Fixer: agent.RoundedRole{
+			Agent:    roles[config.RoleFixer],
+			Late:     roles[config.RoleFixerAfterRound],
+			LateFrom: cfg.ReviewAgentTakeoverRound(config.RoleFixerAfterRound),
+		},
+	}), nil
 }
 
 func newConfiguredAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
@@ -734,6 +747,29 @@ func (m *RunManager) closeSubscribers(runID string) {
 	}
 }
 
+// ownedGateRepoID extracts the repo id from a gate path and refuses a gate this
+// root does not own. Defense in depth behind paths.ForGate, which resolves a
+// hook call's root from the gate path itself: the gate path carries the root
+// that owns it, but repoIDFromGatePath keeps only the basename, so a caller
+// that handed this daemon a gate under a different root - a hand-run CLI or a
+// direct IPC client - would otherwise re-resolve that id under this daemon's
+// own root, admitting or validating a foreign repository's push against local
+// state. The --gate value arrives absolute and symlink-resolved from git
+// rev-parse while the owned path is built from NM_HOME exactly as spelled, so
+// compare through canonicalRoot - this package's one definition of "same root",
+// which reconciles relative against absolute, symlinked against real
+// (/var -> /private/var on macOS), and case on Windows - rather than textually.
+func ownedGateRepoID(p *paths.Paths, gate string) (string, error) {
+	repoID, err := repoIDFromGatePath(gate)
+	if err != nil {
+		return "", err
+	}
+	if owned := p.RepoDir(repoID); canonicalRoot(gate) != canonicalRoot(owned) {
+		return "", fmt.Errorf("gate %q does not belong to this daemon's home (this root owns %q)", gate, owned)
+	}
+	return repoID, nil
+}
+
 // repoIDFromGatePath extracts the repo ID from a gate bare repo path.
 // Gate paths look like: <root>/repos/<id>.git
 func repoIDFromGatePath(gatePath string) (string, error) {
@@ -839,7 +875,7 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 		return "", fmt.Errorf("ref deletion push, no pipeline to run")
 	}
 
-	repoID, err := repoIDFromGatePath(params.Gate)
+	repoID, err := ownedGateRepoID(m.paths, params.Gate)
 	if err != nil {
 		return "", err
 	}
@@ -862,13 +898,13 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 		baseSHA = strings.TrimSpace(params.ReconciledPreviousHead)
 	}
 	if params.LaunchNonce != "" {
-		receipt, err := m.startFreshLaunch(ctx, repo, branch, params.New, baseSHA, params.Gate, params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, "push", params.PiProfile)
+		receipt, err := m.startFreshLaunch(ctx, repo, branch, params.New, baseSHA, params.Gate, params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, params.OmitIntent, "push", params.VerificationPlanID, params.PiProfile)
 		if err != nil {
 			return "", err
 		}
 		return receipt.RunID, nil
 	}
-	return m.startRun(ctx, repo, branch, params.New, baseSHA, "push", params.SkipSteps, params.Intent, params.PRBaseBranch, params.PiProfile)
+	return m.startRun(ctx, repo, branch, params.New, baseSHA, "push", params.SkipSteps, params.Intent, params.PRBaseBranch, params.OmitIntent, params.VerificationPlanID, params.PiProfile)
 }
 
 // HandleStartFreshRun creates or replays a proof-mode launch only after
@@ -881,13 +917,13 @@ func (m *RunManager) HandleStartFreshRun(ctx context.Context, params *ipc.StartF
 	if repo == nil {
 		return ipc.LaunchReceipt{}, fmt.Errorf("unknown repo %s", params.RepoID)
 	}
-	return m.startFreshLaunch(ctx, repo, params.Branch, params.HeadSHA, "", m.paths.RepoDir(repo.ID), params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, "fresh", params.PiProfile)
+	return m.startFreshLaunch(ctx, repo, params.Branch, params.HeadSHA, "", m.paths.RepoDir(repo.ID), params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, params.OmitIntent, "fresh", params.VerificationPlanID, params.PiProfile)
 }
 
 // startFreshLaunch owns proof identity under the branch lock. A nonce may
 // replay only its immutable submitted-head, generation, and persisted-intent
 // digest. It must never fall back to ordinary same-head reattachment.
-func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, gateDir string, skipSteps []types.StepName, intent, launchNonce, validationGeneration, prBaseBranch, trigger string, profiles ...*agentcfg.PiProfile) (ipc.LaunchReceipt, error) {
+func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, gateDir string, skipSteps []types.StepName, intent, launchNonce, validationGeneration, prBaseBranch string, omitIntent bool, trigger, planID string, profiles ...*agentcfg.PiProfile) (ipc.LaunchReceipt, error) {
 	request := agentcfg.OptionalPiProfile(profiles)
 	if err := request.ValidateRequest(); err != nil {
 		return ipc.LaunchReceipt{}, err
@@ -917,11 +953,20 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			return "", err
 		}
 		if existing != nil {
+			if planID != "" && (existing.VerificationPlan == nil || existing.VerificationPlan.ID != planID) {
+				return "", fmt.Errorf("verification plan cannot replace an existing run attachment")
+			}
 			if !existing.PiProfile.Matches(request) {
 				return "", fmt.Errorf("conflicting launch_nonce: Pi profile differs from run pin")
 			}
 			if !launchPRBaseBranchMatches(existing, storedPRBaseBranch) {
 				return "", conflictingLaunchPRBaseBranch(launchNonce)
+			}
+			// The stored value folds the operator's global intent.publish_intent
+			// default in, so only a claim REQUESTING omission against a run
+			// without it is a genuine conflict; the reverse can be the fold.
+			if omitIntent && !existing.OmitIntent {
+				return "", conflictingLaunchOmitIntent(launchNonce)
 			}
 
 			replayed, err := receiptForRun(existing, false)
@@ -939,7 +984,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				receipt = replayed
 				return existing.ID, nil
 			}
-			claimedRun, claimed, err := m.db.ClaimLaunchReceipt(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch)
+			claimedRun, claimed, err := m.db.ClaimLaunchReceipt(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent)
 			if err != nil {
 				return "", err
 			}
@@ -976,7 +1021,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				inheritedPRURL = inheritablePRURL(runs[0])
 			}
 		}
-		runID, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, persistedIntent, db.RunIntentSourceAgent, launchNonce, validationGeneration, requestDigest, storedPRBaseBranch, inheritedPRURL, request)
+		runID, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, persistedIntent, db.RunIntentSourceAgent, launchNonce, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, inheritedPRURL, planID, request)
 		if err != nil {
 			return "", err
 		}
@@ -990,7 +1035,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				return "", err
 			}
 		} else {
-			claimedRun, claimed, err := m.db.ClaimLaunchReceipt(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch)
+			claimedRun, claimed, err := m.db.ClaimLaunchReceipt(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent)
 			if err != nil {
 				return "", err
 			}
@@ -1031,6 +1076,10 @@ func launchPRBaseBranchMatches(run *db.Run, requested string) bool {
 
 func conflictingLaunchPRBaseBranch(launchNonce string) error {
 	return fmt.Errorf("conflicting launch_nonce %q is already bound to a different pr base branch", launchNonce)
+}
+
+func conflictingLaunchOmitIntent(launchNonce string) error {
+	return fmt.Errorf("conflicting launch_nonce %q is already bound to a run that publishes the Intent section", launchNonce)
 }
 
 func validateLaunchNonce(nonce string) error {
@@ -1095,7 +1144,7 @@ func receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
 // retarget can prove it is moving the same still-open review object.
 // A supplied clean caller head must match the selected head before any run
 // starts or is superseded. It never changes head selection.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch, callerHeadSHA string, profiles ...*agentcfg.PiProfile) (string, error) {
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, callerHeadSHA, planID string, profiles ...*agentcfg.PiProfile) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -1172,7 +1221,11 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if storedPRBaseBranch == "" && selectedRun.PRBaseBranch != nil {
 		storedPRBaseBranch = strings.TrimSpace(*selectedRun.PRBaseBranch)
 	}
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, inheritablePRURL(selectedRun), profiles...)
+	// Publication omission is tighten-only on rerun as everywhere else: the
+	// selected run's decision is inherited and this rerun can only add to it.
+	// The locked start then folds in the operator's live global default, which
+	// likewise can only add omission, never remove it.
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, selectedRun.OmitIntent || omitIntent, inheritablePRURL(selectedRun), planID, profiles...)
 }
 
 func inheritablePRURL(run *db.Run) string {
@@ -1287,7 +1340,7 @@ func (m *RunManager) validatePiProfileAgentsBeforeCancel(ctx context.Context, re
 	trustedRepoCfg := loadTrustedRepoConfig(ctx, gateDir, trustedSHA, "")
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effective := config.EffectiveRepoConfig(loadRepoConfigAtSHA(ctx, gateDir, headSHA), trustedRepoCfg, allowRepoCommands)
-	return config.Merge(globalCfg, effective).ValidatePiProfileAgents()
+	return config.MergeForRemote(globalCfg, effective, repo.UpstreamURL).ValidatePiProfileAgents()
 }
 
 func loadRepoConfigAtSHA(ctx context.Context, dir, sha string) *config.RepoConfig {
@@ -1308,16 +1361,16 @@ func loadRepoConfigAtSHA(ctx context.Context, dir, sha string) *config.RepoConfi
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts.
-func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prBaseBranch string, profiles ...*agentcfg.PiProfile) (string, error) {
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, prBaseBranch, "", profiles...)
+func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, planID string, profiles ...*agentcfg.PiProfile) (string, error) {
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, prBaseBranch, omitIntent, "", planID, profiles...)
 }
 
 // startRunWithIntentSource is the common run-creation path. source is empty
 // when no intent is supplied, RunIntentSourceAgent for a new explicit
 // override, and RunIntentSourceRerun for inherited explicit intent.
-func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, prBaseBranch, inheritedPRURL string, profiles ...*agentcfg.PiProfile) (string, error) {
+func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, prBaseBranch string, omitIntent bool, inheritedPRURL, planID string, profiles ...*agentcfg.PiProfile) (string, error) {
 	return m.withBranchLock(repo.ID, branch, func() (string, error) {
-		return m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, source, "", "", "", prBaseBranch, inheritedPRURL, profiles...)
+		return m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, source, "", "", "", prBaseBranch, omitIntent, inheritedPRURL, planID, profiles...)
 	})
 }
 
@@ -1332,7 +1385,7 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 
 // startRunWithIntentSourceLocked performs run creation while the caller owns
 // the repository/branch lock. Proof fields are empty for ordinary launches.
-func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch, inheritedPRURL string, profiles ...*agentcfg.PiProfile) (string, error) {
+func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, inheritedPRURL, planID string, profiles ...*agentcfg.PiProfile) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1363,15 +1416,20 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// ResolvePiProfile checks the global agent list; trusted default-branch
 	// agent selection is checked next because it can still replace that list
 	// with Claude or mixed fallbacks after merge.
-	var globalCfg *config.GlobalConfig
+	//
+	// The global config also decides the caller-side omit-intent default,
+	// which is stamped on the row at creation so recovery and reruns read the
+	// stamp back instead of a since-changed config file. Legacy launches keep
+	// their failed-row diagnostics on a bad global config: the load error is
+	// held until the row exists.
+	globalCfg, globalCfgErr := config.LoadGlobal(m.paths.ConfigFile())
 	var pin *agentcfg.PiProfile
 	if request := agentcfg.OptionalPiProfile(profiles); request != nil {
-		var err error
-		globalCfg, err = config.LoadGlobal(m.paths.ConfigFile())
-		if err != nil {
+		if globalCfgErr != nil {
 			trackStartFailure("load_global_config")
-			return "", fmt.Errorf("load global config: %w", err)
+			return "", fmt.Errorf("load global config: %w", globalCfgErr)
 		}
+		var err error
 		pin, err = globalCfg.ResolvePiProfile(request)
 		if err != nil {
 			trackStartFailure("invalid_pi_profile")
@@ -1383,11 +1441,30 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}
 	}
 
+	plan, err := verificationplan.Resolve(m.paths.RunInputsDir(), planID, repo.ID, branch, headSHA)
+	if err != nil {
+		return "", err
+	}
+	if plan != nil {
+		active, err := m.db.GetActiveRun(repo.ID, branch)
+		if err != nil {
+			return "", err
+		}
+		if active != nil {
+			return "", fmt.Errorf("verification plan is accepted only for a new run; reattach without --verification-plan")
+		}
+		if existing, err := m.db.GetRun(plan.ID); err != nil {
+			return "", err
+		} else if existing != nil {
+			return "", fmt.Errorf("verification plan capture already belongs to a run")
+		}
+	}
+
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
 	storedIntent := intent
-	if source != db.RunIntentSourceRerun && launchNonce == "" {
+	if source != db.RunIntentSourceRerun && launchNonce == "" && plan == nil {
 		storedIntent = strings.TrimSpace(storedIntent)
 	}
 	var runIntent *db.RunIntent
@@ -1403,8 +1480,13 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("invalid_pr_base_branch")
 		return "", err
 	}
+	// The caller-side omit decision is the OR of the explicit per-run request
+	// and the operator's global tighten-only default. It is stamped here, at
+	// creation, and can only reduce publication: the repository's trusted
+	// pr.publish_intent is enforced independently by the PR step.
+	storedOmitIntent := omitIntent || (globalCfg != nil && !globalCfg.Intent.PublishesIntentByDefault())
 
-	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, pin)
+	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, storedOmitIntent, plan, pin)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
@@ -1420,13 +1502,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 
 	// Legacy launches retain their existing failed-row diagnostics on a bad
 	// global config. Explicit profiles already resolved before supersession.
-	if globalCfg == nil {
-		globalCfg, err = config.LoadGlobal(m.paths.ConfigFile())
-		if err != nil {
-			m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
-			trackStartFailure("load_global_config")
-			return "", fmt.Errorf("load global config: %w", err)
-		}
+	if globalCfgErr != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", globalCfgErr))
+		trackStartFailure("load_global_config")
+		return "", fmt.Errorf("load global config: %w", globalCfgErr)
 	}
 
 	// Create worktree from the gate bare repo, where this repository's
@@ -1543,7 +1622,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		// This is not an error: it is the secure default in action.
 		slog.Info("repo commands/agent loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
-	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
 	if run.PiProfile != nil {
 		if err := cfg.ValidatePiProfileAgents(); err != nil {
 			m.db.UpdateRunError(run.ID, err.Error())
@@ -1916,6 +1995,160 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 	}
 
 	return exec.RespondWithOverrides(step, action, findingIDs, instructions, addedFindings, approvalReason)
+}
+
+// HandleAnswerReviewQuestion records one operator answer to a question the
+// run's reviewer asked, and releases the review gate once nothing is left
+// open.
+//
+// The three outcomes are all correct and all expected:
+//
+//   - the reviewer is still working (no gate parked yet). The answer is
+//     durably appended and the reviewer reads it at its next checkpoint, which
+//     is the whole point of emitting questions mid-turn: an early answer can
+//     redirect the pass instead of arriving after the effort is spent.
+//   - the reviewer has parked in waiting-on-answers. Once this answer closes
+//     the last open question, types.ActionAnswer resumes the reviewer's own
+//     session with the answers. That is the push the captain required: nothing
+//     polls, and the reviewer receives a message it did not ask for.
+//   - this answer closed no question that was open before the append - an id
+//     nobody asked, or a correction sent after the last question was already
+//     answered. It is recorded and NO gate is released; see the wasOpen
+//     snapshot below, which exists because the open count alone would let such
+//     an answer steal the verdict on a gate parked on ordinary findings.
+//
+// Every answer is stamped with the ask it settles, so a correction binds to the
+// already-settled ask instead of pre-answering a later re-ask of the same id.
+// The two ways that stamp cannot be trusted are refused before anything is
+// written, and they stay distinguishable from each other and from the third
+// outcome above: a conversation that cannot be READ AT ALL, and one whose
+// question history could not be read TO THE END.
+//
+// The write happens before the release decision, so a failure to resume never
+// loses the answer - the next answer, or a recovered gate, finds it on disk.
+func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answeredBy string) (*ipc.AnswerReviewQuestionResult, error) {
+	questionID = strings.TrimSpace(questionID)
+	answer = strings.TrimSpace(answer)
+	if questionID == "" || answer == "" {
+		return nil, fmt.Errorf("answering a review question needs a question id and an answer")
+	}
+
+	m.mu.Lock()
+	exec, ok := m.executors[runID]
+	m.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("no active executor for run %s", runID)
+	}
+	// A repository that has not turned the conversation on has no channel to
+	// answer into, and the reviewer was never told to ask, so say which setting
+	// would accept an answer rather than report a missing directory.
+	// A question already on disk stays answerable even if review.conversation
+	// has since been turned off: the reviewer asked it while the channel was
+	// open, and the review step reads the same conversation from disk for the
+	// finalize turn, so the answer reaches it. A repository that never enabled
+	// the conversation has no questions file, so it is refused by naming the
+	// setting exactly as before.
+	dir := exec.ReviewConversationAnswerDir(runID)
+	if dir == "" {
+		if !exec.ReviewConversationEnabled() {
+			return nil, fmt.Errorf("run %s has no review conversation: set review.conversation: true in .no-mistakes.yaml on the default branch to let the reviewer ask questions", runID)
+		}
+		return nil, fmt.Errorf("run %s has no review conversation directory", runID)
+	}
+	// Snapshot what was OPEN before the append, because "nothing is open now"
+	// is not evidence that THIS answer closed anything. An answer for an id
+	// nobody asked is recorded as an orphan and leaves the open count at zero,
+	// as does a duplicate or corrected answer sent after the last question was
+	// already closed. Releasing on the count alone let either of those release
+	// a review gate that had parked on ordinary ask-user CODE findings: the
+	// step re-executed as a finalize turn, burned a review round, and the
+	// operator's pending verdict never happened - their next axi respond then
+	// failed with "no step awaiting approval".
+	//
+	// The same snapshot supplies the ask this answer settles. reviewqa cannot
+	// recover that at load time - the two files are appended independently, so
+	// two asks and two answers read the same whether the second answer is a
+	// correction to the first ask or the answer to a re-ask - and binding it
+	// here, at the only writer of answers.ndjson, is what stops a correction
+	// pre-answering the next re-ask of that id.
+	//
+	// So a conversation this cannot READ is refused rather than written
+	// through: an unstamped answer settles nothing, so the questions it was
+	// meant for would park forever with the operator told they had answered
+	// them. The refusal names the read failure, because an operator told "no open
+	// question" about a conversation nobody could read would go looking for
+	// the wrong thing entirely. A conversation that reads fine with nothing
+	// open is unaffected: that answer is still recorded, still stamped, and
+	// still releases no gate.
+	before, err := reviewqa.Load(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read run %s's review conversation before recording the answer: %w", runID, err)
+	}
+	// A question history the reader could not reach the end of is refused for
+	// the same reason, and it is a DIFFERENT failure from the one above: the
+	// file opened and parsed, so nothing here errored, but a later ask of any
+	// id is past the seen region, so the load settles nothing and never will.
+	// Stamping an answer against it would record an answer that can never
+	// close its question, leaving the gate parked forever with the operator
+	// told they had answered it. Refusing before the append is what keeps this
+	// from becoming that silent strand - and it is not the ordinary case of an
+	// answer that closed nothing, which reads fine, stays recorded and is
+	// deliberately not an error.
+	if before.QuestionsIncomplete {
+		return nil, fmt.Errorf("run %s's review question history could not be read to the end (%s), so an answer cannot be bound to the ask it settles; nothing was recorded - read that file for the questions asked, and resolve the parked review with `no-mistakes axi respond` instead", runID, filepath.Join(dir, reviewqa.QuestionsFile))
+	}
+	wasOpen := false
+	askOrdinal := 0
+	for _, e := range before.Open() {
+		if e.ID == questionID {
+			wasOpen = true
+			break
+		}
+	}
+	for _, ask := range before.Asks {
+		if ask.Question.ID == questionID {
+			askOrdinal = ask.Ordinal
+		}
+	}
+
+	if err := reviewqa.AppendAnswer(dir, reviewqa.Answer{
+		ID:         questionID,
+		Answer:     answer,
+		AnsweredBy: strings.TrimSpace(answeredBy),
+		AskOrdinal: askOrdinal,
+	}); err != nil {
+		return nil, err
+	}
+
+	conv, err := reviewqa.Load(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read review conversation after recording the answer: %w", err)
+	}
+	open := conv.Open()
+	result := &ipc.AnswerReviewQuestionResult{OK: true, Open: len(open)}
+	for _, e := range open {
+		result.OpenIDs = append(result.OpenIDs, e.ID)
+	}
+	if len(open) > 0 {
+		result.Note = "recorded; the reviewer still has open questions"
+		return result, nil
+	}
+	if !wasOpen {
+		// Recorded durably and deliberately inert: it corrects the ask it is
+		// stamped with, and no gate is touched. A later re-ask of this id is a
+		// different question and stays open until it is answered itself.
+		result.Note = "recorded; it answered no open question, so no review gate was released"
+		return result, nil
+	}
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+		// Not an error for the caller: the answer is recorded either way, and
+		// "no step awaiting approval" is the ordinary mid-turn case.
+		result.Note = fmt.Sprintf("recorded; the review gate was not released (%v)", err)
+		return result, nil
+	}
+	result.Resumed = true
+	result.Note = "recorded; every question is answered and the reviewer was resumed"
+	return result, nil
 }
 
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent

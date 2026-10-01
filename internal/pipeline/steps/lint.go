@@ -20,7 +20,10 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	if err != nil {
+		return nil, err
+	}
 	lintCmd := sctx.Config.Commands.Lint
 
 	if lintCmd == "" {
@@ -159,6 +162,7 @@ Previous lint findings to address:
 	sctx.Log(fmt.Sprintf("running linter: %s", lintCmd))
 	output, exitCode, err := runStepShellCommand(sctx, lintCmd)
 	if err != nil {
+		logConfiguredCommandOutput(sctx, output, types.StepLint)
 		return nil, fmt.Errorf("run lint command: %w", err)
 	}
 

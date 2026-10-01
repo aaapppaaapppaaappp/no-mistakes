@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 	"github.com/spf13/cobra"
 )
 
@@ -120,6 +122,7 @@ func newAxiRunCmd() *cobra.Command {
 	var launchNonce string
 	var validationGeneration string
 	var baseBranch string
+	var noPublishIntent bool
 	var model, effort string
 	var wait time.Duration
 
@@ -147,6 +150,13 @@ func newAxiRunCmd() *cobra.Command {
 			"--base-branch targets an integration branch other than the repository default\n" +
 			"for this run only (for example an epic branch). It overrides pr.base_branch\n" +
 			"in repo config and is persisted on the run for rebase, PR, and CI steps.\n\n" +
+			"--no-publish-intent keeps the generated public Intent section out of the\n" +
+			"PR body for this run. It is tighten-only: it can never publish intent on a\n" +
+			"repository whose trusted pr.publish_intent disabled it. The full intent\n" +
+			"still reaches every step prompt except the PR-drafting turns, which then\n" +
+			"draft from the diff and commit messages only. It is persisted on the run;\n" +
+			"the global intent.publish_intent: false default applies to runs started\n" +
+			"without it. The running daemon must honor it; an older daemon is refused.\n\n" +
 			"--model and/or --effort opt into an immutable Pi profile for a new run.\n" +
 			"An omitted field comes from agent_config.pi; both must resolve. Requires\n" +
 			"Pi-only agents; raw native selection flags conflict. The pin outranks\n" +
@@ -154,19 +164,20 @@ func newAxiRunCmd() *cobra.Command {
 			"Omit flags to reattach; a different selection cannot change an active run.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
 			"agent. The daemon requires a supported native agent binary, the `agent: cursor`\n" +
-			"ACP alias, or an explicit `acp:<target>` through `acpx`, and fails before the\n" +
-			"first step when none can run.\n\n" +
+			"or `agent: devin` ACP alias, or an explicit `acp:<target>` through `acpx`, and\n" +
+			"fails before the first step when none can run.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackAxiSurface("axi-run", "/axi/run", telemetry.Fields{
-				"auto_yes":         autoYes,
-				"has_intent":       strings.TrimSpace(intent) != "",
-				"has_skip":         strings.TrimSpace(skipValue) != "",
-				"has_base_branch":  strings.TrimSpace(baseBranch) != "",
-				"has_launch_nonce": launchNonce != "",
+				"auto_yes":          autoYes,
+				"has_intent":        strings.TrimSpace(intent) != "",
+				"has_skip":          strings.TrimSpace(skipValue) != "",
+				"has_base_branch":   strings.TrimSpace(baseBranch) != "",
+				"has_launch_nonce":  launchNonce != "",
+				"no_publish_intent": noPublishIntent,
 			}, func() error {
 				skipSteps, err := parseSkipSteps(skipValue)
 				if err != nil {
@@ -177,7 +188,7 @@ func newAxiRunCmd() *cobra.Command {
 				if err != nil {
 					return emitError(cmd, 2, err.Error())
 				}
-				return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, launchNonce, validationGeneration, wait, profile)
+				return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, noPublishIntent, launchNonce, validationGeneration, wait, profile)
 			})
 		},
 	}
@@ -187,22 +198,32 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
+	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
+	cmd.Flags().String("verification-plan", "", "capture a nonempty UTF-8 verification plan as separate run evidence (new runs only)")
 	bindAxiWaitFlag(cmd, &wait)
 	bindPiProfileFlags(cmd, &model, &effort)
 	return cmd
 }
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string) error {
-	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, "", "", defaultAxiWait)
+	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, false, "", "", defaultAxiWait)
 }
 
-func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch, launchNonce, validationGeneration string, wait time.Duration, profiles ...*agentcfg.PiProfile) error {
+func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration string, wait time.Duration, profiles ...*agentcfg.PiProfile) error {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	if err := profile.ValidateRequest(); err != nil {
 		return emitError(cmd, 2, err.Error())
 	}
 	if err := validateAxiWait(wait); err != nil {
 		return emitError(cmd, 2, err.Error(), "Pass a positive duration such as --wait 8m")
+	}
+	planPath := ""
+	planRequested := cmd.Flags().Changed("verification-plan")
+	if planRequested {
+		planPath, _ = cmd.Flags().GetString("verification-plan")
+		if strings.TrimSpace(planPath) == "" {
+			return emitError(cmd, 2, "--verification-plan requires a file path")
+		}
 	}
 	ctx := cmd.Context()
 	driveCtx, cancel, err := boundAxiWait(ctx, wait)
@@ -215,6 +236,17 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
 	defer env.close()
+	// Probe before any RPC carries omit_intent: an older daemon would drop
+	// the unknown field silently and publish the intent it was asked to
+	// withhold, so the run is refused instead. An unreadable global config
+	// (env.cfg holds defaults) cannot rule omission out, so it probes too.
+	globalCfg := env.cfg
+	if env.globalConfigErr != nil {
+		globalCfg = nil
+	}
+	if err := requireDaemonHonorsOmitIntent(env.client, omitIntent, globalCfg); err != nil {
+		return emitError(cmd, 2, err.Error())
+	}
 
 	branch, err := git.CurrentBranch(ctx, ".")
 	if err != nil {
@@ -242,7 +274,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		if strings.TrimSpace(validationGeneration) == "" {
 			return emitError(cmd, 2, "--validation-generation is required with --launch-nonce")
 		}
-		receipt, err := claimLaunchReceipt(env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, profile)
+		receipt, err := claimLaunchReceipt(env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profile)
 		if err != nil {
 			return emitError(cmd, 1, fmt.Sprintf("claim launch receipt: %v", err))
 		}
@@ -269,8 +301,15 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 				return emitError(cmd, 2, err.Error(),
 					"Omit --base-branch to reattach, or abort the active run before starting a new one")
 			}
+			if err := conflictingActiveRunOmitIntent(active, omitIntent); err != nil {
+				return emitError(cmd, 2, err.Error(),
+					"Omit --no-publish-intent to reattach, or abort the active run before starting a new one")
+			}
 			runID = active.ID
 		}
+	}
+	if runID != "" && planRequested {
+		return emitError(cmd, 2, "--verification-plan is accepted only when starting a new run; omit it to reattach")
 	}
 	if runID == "" {
 		if err := configErrorForFreshAxiRun(env, runID); err != nil {
@@ -306,14 +345,37 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		if guard := preflightGuard(ctx, env, branch); guard != nil {
 			return guard(cmd)
 		}
+		planID := ""
+		if planRequested {
+			source, err := filepath.Abs(planPath)
+			if err != nil {
+				return emitError(cmd, 2, err.Error())
+			}
+			var snapshot verificationplan.Snapshot
+			if err := env.client.Call(ipc.MethodCaptureVerificationPlan, &ipc.CaptureVerificationPlanParams{SourcePath: source, RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA}, &snapshot); err != nil {
+				return emitError(cmd, 2, fmt.Sprintf("capture verification plan before push: %v", err))
+			}
+			if snapshot.ID == "" {
+				return emitError(cmd, 2, "daemon returned no verification plan capture; refusing to push")
+			}
+			planID = snapshot.ID
+			defer func() {
+				if err := env.client.Call(ipc.MethodReleaseVerificationPlan, &ipc.ReleaseVerificationPlanParams{CaptureID: snapshot.ID, RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA}, nil); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "release unowned verification plan capture: %v\n", err)
+				}
+			}()
+		}
 		var err error
 		if launchNonce != "" {
-			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, launchNonce, validationGeneration, profile)
+			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, launchNonce, validationGeneration, planID, profile)
 			if err == nil {
 				runID = launchReceipt.RunID
 			}
 		} else {
-			runID, err = triggerRun(ctx, env, branch, skipSteps, intent, baseBranch, profile)
+			runID, err = triggerRun(ctx, env, branch, skipSteps, intent, baseBranch, omitIntent, planID, profile)
+		}
+		if err == nil && planID != "" && runID != planID {
+			err = fmt.Errorf("launched run does not own the captured verification plan")
 		}
 		if err != nil {
 			if ownershipErr, ok := err.(*branchOwnershipError); ok {
@@ -537,13 +599,17 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []types.StepName, intent, baseBranch string, profiles ...*agentcfg.PiProfile) (string, error) {
+func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, planID string, profiles ...*agentcfg.PiProfile) (string, error) {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	pushOptions := append(formatSkipPushOptions(skipSteps), formatPiProfilePushOptions(profile)...)
+	pushOptions = append(pushOptions, formatVerificationPlanPushOptions(planID)...)
 	if opt := formatIntentPushOption(intent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
 	if opt := formatPRBaseBranchPushOption(baseBranch); opt != "" {
+		pushOptions = append(pushOptions, opt)
+	}
+	if opt := formatOmitIntentPushOption(omitIntent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
 	observedHead, err := git.HeadSHA(ctx, ".")
@@ -571,6 +637,9 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 		if err != nil {
 			priorRunIDs = nil
 		}
+	}
+	if _, err := verificationplan.Resolve(env.p.RunInputsDir(), planID, env.repo.ID, branch, submissionHead); err != nil {
+		return "", err
 	}
 	reconciliation, err := gate.ReconcileStaleBranch(ctx, env.p.RepoDir(env.repo.ID), ".", branch, submissionHead, "")
 	if err != nil {
@@ -603,6 +672,9 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 		if !run.PiProfile.Matches(profile) {
 			return "", fmt.Errorf("triggered run has a conflicting Pi profile")
 		}
+		if planID != "" && (run.VerificationPlan == nil || run.VerificationPlan.ID != planID) {
+			return "", fmt.Errorf("triggered run has a conflicting verification plan")
+		}
 		return run.ID, nil
 	}
 	if !shouldRerunAfterNoActiveRun(pushErr) {
@@ -613,9 +685,14 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	// clean-head evidence because it may have changed while waiting above.
 	var rr ipc.RerunResult
 	params := rerunParams(env.repo.ID, branch, skipSteps, intent, baseBranch)
+	params.OmitIntent = omitIntent
 	params.PiProfile = profile
+	params.VerificationPlanID = planID
 	params.CallerHeadSHA, err = rerunCallerHead(ctx)
 	if err != nil {
+		return "", err
+	}
+	if _, err := verificationplan.Resolve(env.p.RunInputsDir(), planID, env.repo.ID, branch, params.CallerHeadSHA); err != nil {
 		return "", err
 	}
 	if err := env.client.Call(ipc.MethodRerun, params, &rr); err != nil {
@@ -624,11 +701,11 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	return rr.RunID, nil
 }
 
-func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, omitIntent bool, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	var result ipc.ClaimLaunchReceiptResult
 	if err := client.Call(ipc.MethodClaimLaunchReceipt, &ipc.ClaimLaunchReceiptParams{
 		RepoID: repoID, Branch: branch, LaunchNonce: launchNonce, PiProfile: agentcfg.OptionalPiProfile(profiles),
-		SubmittedHeadSHA: submittedHeadSHA, ValidationGeneration: validationGeneration, IntentDigest: intentDigest, PRBaseBranch: baseBranch,
+		SubmittedHeadSHA: submittedHeadSHA, ValidationGeneration: validationGeneration, IntentDigest: intentDigest, PRBaseBranch: baseBranch, OmitIntent: omitIntent,
 	}, &result); err != nil {
 		return nil, err
 	}
@@ -641,15 +718,19 @@ func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submitt
 // triggerProofRun captures the immutable submitted commit and waits only for
 // the matching nonce-bound receipt. Ordinary active-run heuristics never prove
 // strict launch identity.
-func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, baseBranch, launchNonce, validationGeneration string, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration, planID string, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	pushOptions := append(formatSkipPushOptions(skipSteps), formatPiProfilePushOptions(profile)...)
+	pushOptions = append(pushOptions, formatVerificationPlanPushOptions(planID)...)
 	pushOptions = append(pushOptions,
 		formatIntentPushOption(intent),
 		formatLaunchNoncePushOption(launchNonce),
 		formatValidationGenerationPushOption(validationGeneration),
 	)
 	if opt := formatPRBaseBranchPushOption(baseBranch); opt != "" {
+		pushOptions = append(pushOptions, opt)
+	}
+	if opt := formatOmitIntentPushOption(omitIntent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
 	if state := freshRunBranchOwnershipState(ctx, env); state != nil {
@@ -662,7 +743,7 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 		}
 		return nil, fmt.Errorf("push %q to gate: %w", branch, pushErr)
 	}
-	if receipt, err := waitForLaunchReceipt(ctx, env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, intent, baseBranch, triggerWaitTimeout, profile); err != nil {
+	if receipt, err := waitForLaunchReceipt(ctx, env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, intent, baseBranch, omitIntent, triggerWaitTimeout, profile); err != nil {
 		return nil, err
 	} else if receipt != nil {
 		return receipt, nil
@@ -670,20 +751,20 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 	var result ipc.StartFreshRunResult
 	if err := env.client.Call(ipc.MethodStartFreshRun, &ipc.StartFreshRunParams{
 		RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: skipSteps,
-		Intent: intent, LaunchNonce: launchNonce, ValidationGeneration: validationGeneration, PRBaseBranch: baseBranch, PiProfile: profile,
+		Intent: intent, LaunchNonce: launchNonce, ValidationGeneration: validationGeneration, PRBaseBranch: baseBranch, OmitIntent: omitIntent, PiProfile: profile, VerificationPlanID: planID,
 	}, &result); err != nil {
 		return nil, fmt.Errorf("start fresh run: %w", err)
 	}
 	return &result.Receipt, nil
 }
 
-func waitForLaunchReceipt(ctx context.Context, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intent, baseBranch string, timeout time.Duration, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func waitForLaunchReceipt(ctx context.Context, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intent, baseBranch string, omitIntent bool, timeout time.Duration, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	poll := time.NewTicker(150 * time.Millisecond)
 	defer poll.Stop()
 	for {
-		receipt, err := claimLaunchReceipt(client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, profiles...)
+		receipt, err := claimLaunchReceipt(client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profiles...)
 		if err != nil {
 			return nil, err
 		}
@@ -782,6 +863,20 @@ func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, base
 	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent, PRBaseBranch: baseBranch}
 }
 
+// conflictingActiveRunOmitIntent reports when --no-publish-intent would be
+// discarded by reattaching to an in-flight run that was started without it,
+// so the driving agent cannot believe the run omits the public Intent
+// section while the active run will actually publish it.
+func conflictingActiveRunOmitIntent(run *ipc.RunInfo, requested bool) error {
+	if !requested || run == nil {
+		return nil
+	}
+	if run.OmitIntent {
+		return nil
+	}
+	return fmt.Errorf("active run %s is already in progress without --no-publish-intent", run.ID)
+}
+
 // emitLaunchReceipt writes the proof before driveRun subscribes, so callers
 // retain the daemon-authored binding even if later driving blocks or fails.
 func emitLaunchReceipt(cmd *cobra.Command, receipt ipc.LaunchReceipt) {
@@ -845,6 +940,31 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			}
 			if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
 				fmt.Fprintf(progress, "%s: protected-path refusal requires an explicit response; --yes leaves this gate awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
+			// An open review question is resolved by an answer, so --yes has no
+			// standing consent to give. Without this it had: the question is an
+			// ask-user finding on the ordinary channel, so gateResolution
+			// selected its id like any other and sent --action fix, handing the
+			// FIXER the question text as work. It guessed an answer and edited
+			// code, the rereview re-emitted the still-open question, and the
+			// second gate was approved as already-fixed - pipeline-authored
+			// changes derived from a question no human ever saw. Same carve-out
+			// shape as the protected-path refusal above, and inert when the
+			// review conversation is off, because a review-question finding
+			// cannot exist then.
+			if pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: an open review question needs an explicit answer (no-mistakes axi answer --question <id> --answer \"...\"); --yes leaves this gate awaiting one\n", gate.Name)
+				return run, false, nil
+			}
+			// The reviewer's question history could not be read in full, so
+			// the gate asks a human to decide it: answers are refused, and a
+			// fixer handed "decide this gate yourself" can only edit code and
+			// converge on an approve. Keyed on the finding ID rather than the
+			// review-question category, which this marker deliberately does not
+			// carry because the answer-first help would be wrong for it.
+			if pipeline.HasUnreadableReviewQuestionHistory(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: the reviewer's question history could not be read in full, so only a human can decide this gate; --yes leaves it awaiting a response\n", gate.Name)
 				return run, false, nil
 			}
 			if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
