@@ -1,7 +1,6 @@
 package steps
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,7 +29,8 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	baseBranch := effectivePRBaseBranch(sctx)
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +142,7 @@ Context:
 - base commit: %s
 - target commit: %s
 - review scope: %s
-- default branch: %s
+- base branch: %s
 - ignore patterns: %s
 
 Rules:
@@ -156,9 +156,9 @@ Rules:
 - After applying the fixes and before verification, re-trace for each finding the concrete failing sequence it describes through the code as it now is, and trace the ordinary successful path through every function you changed, including each of its callers. Remove any alias, branch, parameter, or helper your fix made unreachable. A fix that makes the reported sequence pass while breaking the ordinary path, a caller's assumption, or a sibling site is a regression the next review will report.
 - After all fixes are applied, run one focused verification limited to the changed area (the specific package, file, or test you touched) at the end of the fix round to confirm the fixes hold.
 - Do NOT run the complete repository test suite or lint suite during this fix round. The pipeline has dedicated test and lint steps after review that are the authoritative test and lint gates; their coverage may itself be focused on the changed area when the repository has no configured test or lint commands.
-- Return JSON with a single "summary" field when you are done.
-- The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s
+- If the tool needed for that verification is missing, still apply every fix you intended and skip the unavailable verification. Never make fewer edits, or none, because verification is unavailable.
+- Return JSON with a "summary" field when you are done. Add a "verification_blocked" field, naming the missing tool and why verification could not run, only when the verification you intended could not run; otherwise omit it.
+%s%s
 
 Previous review findings to address:
 %s`,
@@ -166,25 +166,26 @@ Previous review findings to address:
 			baseSHA,
 			sctx.Run.HeadSHA,
 			reviewScope,
-			sctx.Repo.DefaultBranch,
+			baseBranch,
 			ignorePatterns,
+			fixSummaryRules(sctx, types.StepReview),
 			historySection,
 			previousFindings,
 		)
-		// Every logical agent turn owns a fresh hard wall-clock limit. The
-		// fixer keeps the step parent for synchronous preparation and commit
-		// work, so the independent rereviewer cannot inherit its spent
-		// deadline.
+		// Every logical agent turn owns a fresh stall budget. The fixer keeps
+		// the step parent for synchronous preparation and commit work, so the
+		// independent rereviewer cannot inherit its spent deadline.
 		summary, err := s.executeReviewFixWithTimeout(sctx, s.Name(), fixExecutionOptions{
-			RequirePreviousFindings: true,
-			MissingFindingsError:    "review fix requires previous review findings",
-			LogMessage:              "asking agent to fix identified issues...",
-			Prompt:                  fixPrompt,
-			ErrorPrefix:             "agent fix",
-			FallbackSummary:         "address review findings",
-			SessionRole:             pipeline.SessionRoleFixer,
-			Purpose:                 "review-fix",
-			Workload:                workload,
+			RequirePreviousFindings:   true,
+			MissingFindingsError:      "review fix requires previous review findings",
+			LogMessage:                "asking agent to fix identified issues...",
+			Prompt:                    fixPrompt,
+			ErrorPrefix:               "agent fix",
+			FallbackSummary:           "address review findings",
+			SessionRole:               pipeline.SessionRoleFixer,
+			Purpose:                   "review-fix",
+			Workload:                  workload,
+			ReportBlockedVerification: true,
 		})
 		if err != nil {
 			return nil, err
@@ -193,10 +194,8 @@ Previous review findings to address:
 	}
 	reviewTargetSHA := sctx.Run.HeadSHA
 
-	// The changed-file set is read once and viewed two ways on purpose: the
-	// ignore-filtered subset decides whether there is anything to review, while
-	// trusted path instructions are selected against the complete set (see
-	// matchPathInstructions).
+	// Required instruction-covered paths join the review scope before the empty
+	// scope shortcut, so pushed ignores cannot waive a trusted review obligation.
 	var args []string
 	if sctx.Fixing {
 		args = []string{"diff", "--name-only", "-z", "--no-renames", baseSHA}
@@ -209,7 +208,15 @@ Previous review findings to address:
 	}
 	changed := changedPathList(changedFiles)
 
-	reviewable := reviewablePaths(changed, sctx.Config.IgnorePatterns)
+	reviewable, pathInstructions := reviewPathsAndInstructions(changed, sctx.Config, sctx.Log)
+	var retained *Findings
+	if sctx.CoverageContinuation != nil {
+		prior, err := retainedCoverageForReview(sctx, baseSHA, reviewTargetSHA, reviewable)
+		if err != nil {
+			return refusedCoverageContinuation(sctx, err)
+		}
+		retained = &prior
+	}
 	if len(reviewable) == 0 {
 		sctx.Log("no changes to review")
 		noChangeFindings := Findings{
@@ -254,18 +261,6 @@ Previous review findings to address:
 		return nil, err
 	}
 	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
-
-	// Path-scoped repository review guidance, taken from the trusted
-	// default-branch config copy (regardless of allow_repo_commands) so a pushed
-	// branch cannot steer the reviewer that gates it. Selection runs against the
-	// complete changed-file set, never the ignore-filtered one, so a pushed
-	// ignore_patterns entry cannot suppress a trusted rule. Only blocks whose
-	// glob matches a changed path are appended, so a repository with none
-	// configured - or none relevant to this diff - gets the prompt above
-	// unchanged.
-	pathInstructionMatches := matchPathInstructions(changed, sctx.Config.Review.PathInstructions)
-	logPathInstructions(sctx.Log, pathInstructionMatches)
-	pathInstructions := reviewPathInstructionsSection(pathInstructionMatches)
 
 	// The authorization/privacy obligation below specializes the existing
 	// concrete-state trace only when changed behavior crosses a potentially
@@ -322,7 +317,7 @@ Context:
 - base commit: %s
 - target commit: %s
 - review scope: %s
-- default branch: %s
+- base branch: %s
 - ignore patterns: %s
 
 Task:
@@ -380,7 +375,7 @@ Risk assessment (after listing all findings):
 		baseSHA,
 		sctx.Run.HeadSHA,
 		reviewScope,
-		sctx.Repo.DefaultBranch,
+		baseBranch,
 		ignorePatterns,
 		reviewCoverageSection(reviewable),
 		historySection,
@@ -459,21 +454,36 @@ Risk assessment (after listing all findings):
 		Workload:   workload,
 	}
 	var findings Findings
-	for attempt := 1; ; attempt++ {
-		result, err := s.runReviewAgent(sctx, "agent review", sessionRole, opts)
-		if err == nil {
-			findings, err = parseReviewAnalyzerOutput(result)
-			if err == nil {
-				break
-			}
-		} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
+	var validationErrors []error
+	if retained != nil {
+		findings, err = s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, *retained, reviewable, askDir)
+		if err != nil {
 			return nil, err
 		}
-		if attempt == reviewAnalyzerMaxAttempts {
-			return nil, fmt.Errorf("validate review analyzer findings after %d attempts: %w", reviewAnalyzerMaxAttempts, err)
+		if _, err := retainedCoverageForReview(sctx, baseSHA, reviewTargetSHA, reviewable); err != nil {
+			return refusedCoverageContinuation(sctx, err)
 		}
-		sctx.Log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", strings.ReplaceAll(err.Error(), "\n", "; "), attempt+1, reviewAnalyzerMaxAttempts))
-		opts.Prompt = turnPrompt + reviewRetryNote(err)
+	} else {
+		for attempt := 1; ; attempt++ {
+			result, err := s.runReviewAgent(sctx, "agent review", sessionRole, opts)
+			if err == nil {
+				findings, err = parseReviewAnalyzerOutput(result)
+				if err == nil {
+					break
+				}
+			} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
+				return nil, err
+			}
+			validationErrors = append(validationErrors, err)
+			if attempt == reviewAnalyzerMaxAttempts {
+				if summary := distinctReviewValidationFailures(validationErrors); summary != "" {
+					return nil, agent.RejectStructuredOutput(fmt.Errorf("validate review analyzer findings after %d attempts: output kept failing validation across distinct fields (%s): %sattempt %d: %w", reviewAnalyzerMaxAttempts, summary, reviewValidationAttempts(validationErrors[:attempt-1]), attempt, err))
+				}
+				return nil, agent.RejectStructuredOutput(fmt.Errorf("validate review analyzer findings after %d attempts: %w", reviewAnalyzerMaxAttempts, err))
+			}
+			sctx.Log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", strings.ReplaceAll(err.Error(), "\n", "; "), attempt+1, reviewAnalyzerMaxAttempts))
+			opts.Prompt = turnPrompt + reviewRetryNote(err)
+		}
 	}
 
 	// Phase ownership boundary: drop findings that only claim later pipeline-
@@ -496,8 +506,10 @@ Risk assessment (after listing all findings):
 	// must not have a fresh review inherit questions an earlier run asked.
 	// Delivering an answer to a finalize turn is the read-side case and is
 	// handled above; this is the ask-side one.
-	if err := s.appendOpenReviewQuestionFindings(sctx, askDir, &findings); err != nil {
-		return nil, err
+	if retained == nil {
+		if err := s.appendOpenReviewQuestionFindings(sctx, askDir, &findings); err != nil {
+			return nil, err
+		}
 	}
 	needsApproval := hasBlockingFindings(findings.Items)
 	if !needsApproval && !reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable) {
@@ -517,7 +529,10 @@ Risk assessment (after listing all findings):
 		// nothing to fix. The completion turn keeps the operator out of that
 		// loop; whatever is still uncovered after it parks with the explicit
 		// remainder named, so a partial or fabricated record never approves.
-		completed, err := s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, findings, reviewable, askDir)
+		completed := findings
+		if retained == nil {
+			completed, err = s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, findings, reviewable, askDir)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -528,6 +543,7 @@ Risk assessment (after listing all findings):
 			needsApproval = true
 		}
 	}
+	findings.ReviewCoverageScope = currentReviewCoverageScope(sctx, baseSHA, reviewTargetSHA, reviewable)
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
@@ -585,7 +601,7 @@ func coveragePathLine(p string) string {
 // file the reviewer did not examine still must not be listed.
 func reviewCoverageSection(paths []string) string {
 	var b strings.Builder
-	b.WriteString("\nChanged files this review is held to (computed by the pipeline from the branch diff, minus ignored paths):\n")
+	b.WriteString("\nChanged files this review is held to (computed by the pipeline from the branch diff, minus ignored paths, plus instruction-covered paths unless the trusted default branch also ignores them):\n")
 	for _, p := range paths {
 		fmt.Fprintf(&b, "- %s\n", coveragePathLine(p))
 	}
@@ -612,7 +628,7 @@ func reviewCoverageCompletionSection(missing []string) string {
 }
 
 // completeCoverageGaps runs at most one focused review turn over exactly the
-// reviewable files the just-finished pass did not cover, and merges its
+// reviewable files the current or retained pass did not cover, and merges its
 // findings and coverage record into the round's. It runs only on a round that
 // would otherwise park SOLELY on a coverage gap (zero blocking findings), so
 // a healthy full-coverage review costs nothing extra and a round with
@@ -807,6 +823,34 @@ func parseReviewAnalyzerOutput(result *agent.Result) (Findings, error) {
 	return findings, nil
 }
 
+func distinctReviewValidationFailures(failures []error) string {
+	fields := make([]string, 0, len(failures))
+	seen := make(map[string]struct{}, len(failures))
+	for _, failure := range failures {
+		var violation *agent.SchemaViolation
+		if !errors.As(failure, &violation) || violation.Field == "" {
+			continue
+		}
+		if _, ok := seen[violation.Field]; ok {
+			continue
+		}
+		seen[violation.Field] = struct{}{}
+		fields = append(fields, violation.Field)
+	}
+	if len(fields) < 2 {
+		return ""
+	}
+	return strings.Join(fields, ", ")
+}
+
+func reviewValidationAttempts(failures []error) string {
+	var attempts strings.Builder
+	for i, failure := range failures {
+		fmt.Fprintf(&attempts, "attempt %d: %s; ", i+1, strings.ReplaceAll(failure.Error(), "\n", "; "))
+	}
+	return attempts.String()
+}
+
 // reviewRetryNote is the only thing a rerun review learns from the attempt
 // before it: the validation error, framed as data.
 func reviewRetryNote(err error) string {
@@ -897,6 +941,7 @@ func sanitizedPreviousFindingsForPrompt(raw string) string {
 		findings.Items[i].Description = sanitizePromptMultilineText(findings.Items[i].Description)
 		findings.Items[i].Source = sanitizePromptText(findings.Items[i].Source)
 		findings.Items[i].UserInstructions = sanitizePromptMultilineText(findings.Items[i].UserInstructions)
+		findings.Items[i].DriverInstructions = sanitizePromptMultilineText(findings.Items[i].DriverInstructions)
 		findings.Items[i].ReviewScope = sanitizePromptText(findings.Items[i].ReviewScope)
 		findings.Items[i].Category = sanitizePromptText(findings.Items[i].Category)
 		findings.Items[i].Check = sanitizePromptText(findings.Items[i].Check)
@@ -938,36 +983,36 @@ func (s *ReviewStep) executeReviewFixWithTimeout(sctx *pipeline.StepContext, ste
 }
 
 func (s *ReviewStep) runReviewAgent(sctx *pipeline.StepContext, prefix string, role pipeline.SessionRole, opts agent.RunOpts) (*agent.Result, error) {
-	ctx, cancel, timeout := s.reviewAgentContext(sctx.Ctx, sctx.Config)
-	defer cancel()
-	result, err := sctx.RunAgentSessionContext(ctx, role, opts)
+	timeout := reviewAgentTimeout(sctx.Config)
+	result, err := sctx.RunAgentSessionBudget(sctx.Ctx, timeout, reviewAgentWorkingTimeout(sctx.Config), errReviewAgentTimeout, role, opts)
 	if err != nil {
-		err = reviewAgentError(ctx, timeout, prefix, err)
+		err = reviewAgentError(timeout, prefix, err)
 	}
 	return result, err
 }
 
-func (s *ReviewStep) reviewAgentContext(parent context.Context, cfg *config.Config) (context.Context, context.CancelFunc, time.Duration) {
-	timeout := config.DefaultReviewAgentTimeout
+func reviewAgentTimeout(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.ReviewAgentTimeout > 0 {
-		timeout = cfg.ReviewAgentTimeout
+		return cfg.ReviewAgentTimeout
 	}
-	now := time.Now()
-	if s != nil && s.now != nil {
-		now = s.now()
+	return config.DefaultReviewAgentTimeout
+}
+
+func reviewAgentWorkingTimeout(cfg *config.Config) time.Duration {
+	if cfg == nil {
+		return 0
 	}
-	ctx, cancel := context.WithDeadlineCause(parent, now.Add(timeout), errReviewAgentTimeout)
-	return ctx, cancel, timeout
+	return cfg.ReviewAgentWorkingTimeout
 }
 
 var errReviewAgentTimeout = errors.New("review agent timeout")
 
-// reviewAgentError renders one review invocation's absolute wall-clock expiry.
-// The measured activity evidence comes from the shared agent-run seam; the hard
-// limit is never restated as inactivity because activity does not reset it.
-func reviewAgentError(ctx context.Context, timeout time.Duration, prefix string, err error) error {
-	if timeout > 0 && errors.Is(context.Cause(ctx), errReviewAgentTimeout) {
-		return fmt.Errorf("%s reached its absolute wall-clock limit after %s: %w", prefix, timeout, err)
+// reviewAgentError renders one review invocation's budget expiry. The shared
+// agent-run seam supplies which bound cut the turn (silent budget, stall budget, or still-working cap),
+// how long it ran, and the measured activity evidence.
+func reviewAgentError(timeout time.Duration, prefix string, err error) error {
+	if timeout > 0 && errors.Is(err, errReviewAgentTimeout) {
+		return fmt.Errorf("%s reached its invocation budget %s: %w", prefix, pipeline.AgentBudgetBound(err, timeout), err)
 	}
 	return fmt.Errorf("%s: %w", prefix, err)
 }

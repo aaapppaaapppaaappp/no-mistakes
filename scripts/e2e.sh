@@ -59,9 +59,10 @@ trap 'reap_inventory; if [[ "${OWNED_INVENTORY}" -eq 1 ]]; then rm -rf "$NM_E2E_
 # Default args match the historical Makefile e2e target; callers may override.
 if [[ "$#" -eq 0 ]]; then
   # The user-journey matrix runs native backends serially because each case
-  # owns process-wide environment. Four backends plus the remaining package
-  # journeys no longer fit the historical five-minute package budget.
-  set -- -tags=e2e -count=1 -timeout 480s ./internal/e2e/... ./internal/pipeline/steps/...
+  # owns process-wide environment. A full macOS run took 1127s for internal/e2e,
+  # so the package budget includes room for the complete serial journey matrix
+  # and ordinary variance. Individual scenario guards remain unchanged.
+  set -- -tags=e2e -count=1 -timeout 25m ./internal/e2e/... ./internal/pipeline/steps/...
 fi
 
 go test "$@"

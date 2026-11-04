@@ -1,12 +1,14 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -207,6 +209,42 @@ func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
 	return string(out), nil
 }
 
+// stepGitRunTree is stepGitRun for a read that only its context deadline can
+// end, such as ls-remote against a peer that never answers. cmd.Output returns
+// after every process holding its pipes has exited, and cancelling the context
+// kills git alone: a transport helper it started (ssh, git-remote-https, or the
+// real git.exe behind the cmd\git.exe launcher on Windows) keeps the pipes open
+// and the read hangs. shellenv ends the whole process tree on cancellation.
+func stepGitRunTree(sctx *pipeline.StepContext, args ...string) (string, error) {
+	cmd := stepCmd(sctx, "git", args...)
+	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+	// OutputShellCommand never fills ExitError.Stderr, so capture it here.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	shellenv.ConfigureShellCommand(cmd)
+	out, err := shellenv.OutputShellCommand(cmd)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(strings.TrimSpace(stderr.String())))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// stepGitRunEnv is stepGitRun with extra environment variables appended after
+// the step environment, for commands that read identity from GIT_* variables.
+func stepGitRunEnv(sctx *pipeline.StepContext, extraEnv []string, args ...string) (string, error) {
+	cmd := stepCmd(sctx, "git", args...)
+	cmd.Env = append(git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir), extraEnv...)
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func stepGitHeadSHA(sctx *pipeline.StepContext) (string, error) {
 	return stepGitRun(sctx, "rev-parse", "HEAD")
 }
@@ -309,11 +347,25 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 }
 
 func runShellCommandWithProcessEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {
+	return runShellCommandWithPriority(ctx, dir, env, cmdStr, 0)
+}
+
+func runShellCommandWithPriority(ctx context.Context, dir string, env []string, cmdStr string, nice int) (string, int, error) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "cmd.exe", "/c", cmdStr)
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", shellenv.OwnOOMScoreScript(cmdStr))
+	}
+	if nice != 0 {
+		if nice < 0 || nice > 19 || runtime.GOOS == "windows" {
+			return "", -1, fmt.Errorf("unsupported command niceness %d on %s", nice, runtime.GOOS)
+		}
+		if cmd.Err != nil {
+			return "", -1, cmd.Err
+		}
+		// Run the already-resolved shell under nice with the same arguments.
+		cmd = exec.CommandContext(ctx, "nice", append([]string{"-n", strconv.Itoa(nice), cmd.Path}, cmd.Args[1:]...)...)
 	}
 	shellenv.ConfigureCooperativeShellCommand(cmd)
 	cmd.Dir = dir

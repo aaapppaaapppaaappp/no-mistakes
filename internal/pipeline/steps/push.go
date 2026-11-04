@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gatepkg "github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -39,7 +40,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			return nil, fmt.Errorf("prepare formatter dependencies: %w", err)
 		}
 		sctx.Log(fmt.Sprintf("running formatter: %s", fmtCmd))
-		output, exitCode, err := runStepShellCommand(sctx, fmtCmd)
+		output, exitCode, err := runRepositoryCommand(sctx, "format", fmtCmd)
 		if err != nil {
 			sctx.Log(fmt.Sprintf("warning: format command failed: %v: %s", err, output))
 		} else if exitCode != 0 {
@@ -57,10 +58,19 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	if strings.TrimSpace(status) != "" {
 		sctx.Log("committing agent changes...")
+		// A configured commit.fix_message renders this subject too; the
+		// built-in template keeps the historical subject. Rendering first
+		// leaves nothing staged when the template rejects the branch.
+		message := "no-mistakes: apply agent fixes"
+		if tmpl := sctx.Config.Commit.FixMessage; tmpl != "" && tmpl != config.DefaultFixMessageTemplate {
+			if message, err = sctx.Config.Commit.RenderFixMessageForBranch(s.Name(), "apply agent fixes", sctx.Run.Branch); err != nil {
+				return nil, fmt.Errorf("render push commit message: %w", err)
+			}
+		}
 		if err := stagePipelineChanges(sctx); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
 		}
-		if err := commitPipelineCorrection(ctx, sctx.WorkDir, "no-mistakes: apply agent fixes", sctx.Log); err != nil {
+		if err := commitPipelineCorrection(ctx, sctx.WorkDir, message, sctx.Log); err != nil {
 			return nil, fmt.Errorf("commit agent changes: %w", err)
 		}
 		headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
