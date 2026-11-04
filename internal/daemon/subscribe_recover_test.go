@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -710,12 +711,18 @@ func TestRecoverCleansUpOrphanedWorktrees(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create orphaned worktree directories.
+	// Create orphaned worktree directories, backdated past the default
+	// worktree retention window so startup's retention-aware reap removes it
+	// deterministically rather than waiting out the window.
 	orphanDir := p.WorktreeDir("some-repo", "some-run")
 	if err := os.MkdirAll(orphanDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(orphanDir, "test.txt"), []byte("orphan"), 0o644)
+	old := time.Now().Add(-2 * config.DefaultWorktreeRetention)
+	if err := os.Chtimes(orphanDir, old, old); err != nil {
+		t.Fatal(err)
+	}
 
 	d, err := db.Open(p.DB())
 	if err != nil {
@@ -880,6 +887,17 @@ func TestSkipWorktreeCleanup_CIMonitorInterrupted(t *testing.T) {
 			t.Fatal("a non-git worktree dir for a ci-interrupted run must fail safe to preserve")
 		}
 	})
+
+	t.Run("reclaims worktree that is already gone", func(t *testing.T) {
+		runID, wtPath := newInterruptedWorktree(t, headSHA)
+		if err := os.RemoveAll(wtPath); err != nil {
+			t.Fatal(err)
+		}
+		skip, reason := skipWorktreeCleanup(ctx, d, runID, wtPath)
+		if skip {
+			t.Fatalf("a run whose worktree directory no longer exists has nothing unpushed to lose, so it should be reclaimed (skip=false), got skip=true: %s", reason)
+		}
+	})
 }
 
 // TestRecoverIsolatesGateRepoHooksPath covers issue #122 for existing
@@ -983,5 +1001,71 @@ exit 0
 	}
 	if strings.Contains(content, ">/dev/null 2>&1 || true") {
 		t.Fatalf("migrated hook should not silently swallow notify-push errors, got:\n%s", content)
+	}
+}
+
+func TestRecoverOnStartup_FinalizesCommittedCI(t *testing.T) {
+	for _, state := range []string{"open"} {
+		t.Run(state, func(t *testing.T) {
+			root, err := os.MkdirTemp("", "dtest")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(root) })
+			p := paths.WithRoot(root)
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.Close() })
+			repo, err := database.InsertRepoWithID("terminal-pr-"+state, t.TempDir(), "https://github.com/test/repo", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "feature", "abc123", "def456")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunPRState(run.ID, state); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			ci, err := database.InsertStepResult(run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompleteCIStep(ci.ID, run.ID, false, 0, 1234, "ci.log"); err != nil {
+				t.Fatal(err)
+			}
+
+			runTestDaemon(t, p, database, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepCI}} }, 3*time.Second)
+
+			got, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != types.RunChecksPassed || got.PRState == nil || *got.PRState != state {
+				t.Fatalf("startup reconciliation = status %s pr_state %v, want checks_passed/%s", got.Status, got.PRState, state)
+			}
+			gotCI, err := database.GetStepResult(ci.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotCI.Status != types.StepStatusCompleted || gotCI.DurationMS == nil || *gotCI.DurationMS != 1234 {
+				t.Fatalf("startup reconciliation CI status = %s, want completed", gotCI.Status)
+			}
+			active, err := lifecycle.ActiveRuns(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(active) != 0 {
+				t.Fatalf("startup reconciliation retained active runs: %+v", active)
+			}
+		})
 	}
 }

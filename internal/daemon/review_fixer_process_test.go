@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
 
 func TestReviewFixerGlobalConfigRoutesRealProcessesAndKeepsUnslothProfilePrivate(t *testing.T) {
@@ -60,7 +61,7 @@ review_fixer_command: [%q, start, codex, --persist]
 	}
 	cfg := config.Merge(global, &config.RepoConfig{})
 	t.Setenv("CODEX_HOME", t.TempDir())
-	pipelineAgent, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), exec.LookPath)
+	pipelineAgent, _, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), exec.LookPath, runenv.Overlay{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

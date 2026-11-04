@@ -15,6 +15,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
 
 func TestReviewFixerACPPiProfilesRouteThroughExactSchemaProcesses(t *testing.T) {
@@ -182,7 +183,7 @@ agent_config:
 		t.Fatal(err)
 	}
 	cfg := config.Merge(global, &config.RepoConfig{})
-	pipelineAgent, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), exec.LookPath)
+	pipelineAgent, _, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), exec.LookPath, runenv.Overlay{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

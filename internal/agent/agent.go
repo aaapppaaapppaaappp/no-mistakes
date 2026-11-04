@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -34,6 +36,11 @@ type Agent interface {
 // RunOpts configures a single agent invocation.
 type RunOpts struct {
 	Prompt string
+	// RequireCompletedChildren refuses a successful native agent exit if its
+	// owned process group or job still has children after the bounded settle
+	// window, or completion cannot be verified.
+	// It does not verify detached checks or their exit statuses.
+	RequireCompletedChildren bool
 	// Env appends invocation-scoped environment entries to the agent process.
 	// Entries later in the slice override inherited values.
 	Env         []string
@@ -70,7 +77,8 @@ type RunOpts struct {
 	// OnAttempt receives each concrete adapter attempt, including retries and
 	// fallback-provider attempts, after it completes. It is instrumentation
 	// only and must not change invocation behavior.
-	OnAttempt func(Attempt)
+	OnAttempt       func(Attempt)
+	ConfiguredModel string
 }
 
 // IsStructuredOutputRejected reports whether an invocation completed but its
@@ -84,13 +92,32 @@ func IsStructuredOutputRejected(err error) bool {
 	return errors.As(err, &rejection) && rejection.StructuredOutputRejected()
 }
 
+// IsUsageLimitReached reports the adapter's terminal usage-limit signal. The
+// signal remains matchable through pipeline error wrappers, even when a
+// timeout diagnostic bounds the adapter's displayed error text.
+func IsUsageLimitReached(err error) bool {
+	var limit interface {
+		UsageLimitReached() bool
+	}
+	return errors.As(err, &limit) && limit.UsageLimitReached()
+}
+
+func IsTerminalProviderError(err error) bool {
+	var terminal interface {
+		TerminalProviderError() bool
+	}
+	return errors.As(err, &terminal) && terminal.TerminalProviderError()
+}
+
 type structuredOutputRejection struct{ err error }
 
 func (e *structuredOutputRejection) Error() string                { return e.err.Error() }
 func (e *structuredOutputRejection) Unwrap() error                { return e.err }
 func (*structuredOutputRejection) StructuredOutputRejected() bool { return true }
 
-func rejectStructuredOutput(err error) error {
+// RejectStructuredOutput marks absent, malformed, or schema-rejected final
+// output without changing its diagnostic or underlying error chain.
+func RejectStructuredOutput(err error) error {
 	if err == nil || IsStructuredOutputRejected(err) {
 		return err
 	}
@@ -101,6 +128,7 @@ func rejectStructuredOutput(err error) error {
 // invocation. An Agent may make several attempts when it retries transient
 // failures or moves to a fallback provider.
 type Attempt struct {
+	ConfiguredModel string
 	Agent           string
 	Result          *Result
 	Err             error
@@ -222,6 +250,10 @@ type LifecycleEvent struct {
 	Phase   string
 	PID     int
 	Message string
+	// NextAgent names the agent a LifecyclePhaseQuotaSwitch event moves the
+	// run to, so the executor can record the switch on the run's quota-routing
+	// record without parsing the prose. Empty on every other phase.
+	NextAgent string
 }
 
 // Result holds the output of an agent invocation.
@@ -239,7 +271,8 @@ type Result struct {
 	// when the adapter reports one. Callers persist it to resume later.
 	SessionID string
 	// Resumed reports whether this invocation resumed opts.Session.ID.
-	Resumed bool
+	Resumed         bool
+	ResumeRetryable *bool
 	// Model is the model the adapter reported serving this invocation, when
 	// available. Instrumentation records it, and eval replay validates it
 	// against the requested candidate.
@@ -362,7 +395,7 @@ func finalizeTextResult(agentName, text string, schema json.RawMessage, usage To
 	if text == "" {
 		err := fmt.Errorf("%s returned no text output", agentName)
 		if len(schema) > 0 {
-			return resultFromUsage(usage), rejectStructuredOutput(err)
+			return resultFromUsage(usage), RejectStructuredOutput(err)
 		}
 		return resultFromUsage(usage), err
 	}
@@ -372,7 +405,7 @@ func finalizeTextResult(agentName, text string, schema json.RawMessage, usage To
 
 	output, err := parseStructuredTextOutput(text, schema, strings.HasPrefix(agentName, "acp:"))
 	if err != nil {
-		return resultFromUsage(usage), rejectStructuredOutput(fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text)))
+		return resultFromUsage(usage), RejectStructuredOutput(fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text)))
 	}
 
 	res := textResult(text, usage)
@@ -1064,7 +1097,7 @@ func validateStructuredOutput(output, schema json.RawMessage) error {
 		return err
 	}
 
-	if err := validateJSONValue(value, parsedSchema, ""); err != nil {
+	if err := validateJSONValue(value, parsedSchema, "", ""); err != nil {
 		return fmt.Errorf("JSON output %w", err)
 	}
 	return nil
@@ -1103,69 +1136,87 @@ func decodeJSONValue(raw []byte) (any, error) {
 	return value, nil
 }
 
-func validateJSONValue(value, schema any, path string) error {
+// SchemaViolation is a structured output's rejection by the requested schema.
+// Field names the schema field that failed as a dotted path without array
+// indices (so the same field fails under one name whichever array element
+// carried it); it is empty when the failure is the whole output's own type.
+type SchemaViolation struct {
+	Field   string
+	Message string
+}
+
+func (e *SchemaViolation) Error() string { return e.Message }
+
+func schemaViolation(field, format string, args ...any) error {
+	return &SchemaViolation{Field: field, Message: fmt.Sprintf(format, args...)}
+}
+
+func validateJSONValue(value, schema any, path, field string) error {
 	schemaMap, ok := schema.(map[string]any)
 	if !ok {
 		return nil
 	}
 
 	if enum, ok := schemaMap["enum"].([]any); ok && !matchesEnum(value, enum) {
-		return fmt.Errorf("%smust match one of the allowed values", formatJSONPath(path))
+		return schemaViolation(field, "%smust match one of the allowed values", formatJSONPath(path))
 	}
 
 	if types, ok := schemaTypes(schemaMap); ok && !matchesAnyType(value, types) {
-		return fmt.Errorf("%smust be %s", formatJSONPath(path), strings.Join(types, " or "))
+		return schemaViolation(field, "%smust be %s", formatJSONPath(path), strings.Join(types, " or "))
 	}
 
 	if object, ok := value.(map[string]any); ok {
-		if err := validateJSONObject(object, schemaMap, path); err != nil {
+		if err := validateJSONObject(object, schemaMap, path, field); err != nil {
 			return err
 		}
 	}
 	if array, ok := value.([]any); ok {
-		if err := validateJSONArray(array, schemaMap, path); err != nil {
+		if err := validateJSONArray(array, schemaMap, path, field); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateJSONObject(object map[string]any, schema map[string]any, path string) error {
+func validateJSONObject(object map[string]any, schema map[string]any, path, field string) error {
 	required := stringSlice(schema["required"])
 	for _, key := range required {
 		if _, ok := object[key]; !ok {
-			return fmt.Errorf("%smissing required field %q", formatJSONPath(path), key)
+			return schemaViolation(joinJSONPath(field, key), "%smissing required field %q", formatJSONPath(path), key)
 		}
 	}
 
+	// Keys are checked in sorted order so the same output always reports the
+	// same violation; map order would let an unchanged retry name a different
+	// field and read as a distinct failure.
 	properties, _ := schema["properties"].(map[string]any)
 	if additional, ok := schema["additionalProperties"].(bool); ok && !additional {
-		for key := range object {
+		for _, key := range slices.Sorted(maps.Keys(object)) {
 			if _, ok := properties[key]; !ok {
-				return fmt.Errorf("%scontains unknown field %q", formatJSONPath(path), key)
+				return schemaViolation(joinJSONPath(field, key), "%scontains unknown field %q", formatJSONPath(path), key)
 			}
 		}
 	}
 
-	for key, propSchema := range properties {
+	for _, key := range slices.Sorted(maps.Keys(properties)) {
 		child, ok := object[key]
 		if !ok {
 			continue
 		}
-		if err := validateJSONValue(child, propSchema, joinJSONPath(path, key)); err != nil {
+		if err := validateJSONValue(child, properties[key], joinJSONPath(path, key), joinJSONPath(field, key)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateJSONArray(array []any, schema map[string]any, path string) error {
+func validateJSONArray(array []any, schema map[string]any, path, field string) error {
 	itemsSchema, ok := schema["items"]
 	if !ok {
 		return nil
 	}
 	for i, item := range array {
-		if err := validateJSONValue(item, itemsSchema, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+		if err := validateJSONValue(item, itemsSchema, fmt.Sprintf("%s[%d]", path, i), field); err != nil {
 			return err
 		}
 	}

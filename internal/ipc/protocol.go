@@ -9,29 +9,35 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 )
 
+// MaxFrameBytes is the existing scanner limit for IPC requests, responses, and events.
+const MaxFrameBytes = 1024 * 1024
+
 // JSON-RPC 2.0 method names.
 const (
-	MethodPushReceived            = "push_received"
-	MethodResolvePiProfile        = "resolve_pi_profile"
-	MethodProbeOmitIntent         = "probe_omit_intent"
-	MethodReleaseVerificationPlan = "release_verification_plan"
-	MethodCaptureVerificationPlan = "capture_verification_plan"
-	MethodStartFreshRun           = "start_fresh_run"
-	MethodClaimLaunchReceipt      = "claim_launch_receipt"
-	MethodGetRun                  = "get_run"
-	MethodGetStepDiff             = "get_step_diff"
-	MethodGetRuns                 = "get_runs"
-	MethodGetRunsForHead          = "get_runs_for_head"
-	MethodGetActiveRun            = "get_active_run"
-	MethodRerun                   = "rerun"
-	MethodSubscribe               = "subscribe"
-	MethodRespond                 = "respond"
-	MethodAnswerReview            = "answer_review_question"
-	MethodCancelRun               = "cancel_run"
-	MethodGateContext             = "gate_context"
-	MethodAdmitPush               = "admit_push"
-	MethodHealth                  = "health"
-	MethodShutdown                = "shutdown"
+	MethodPushReceived              = "push_received"
+	MethodResolvePiProfile          = "resolve_pi_profile"
+	MethodProbeOmitIntent           = "probe_omit_intent"
+	MethodReleaseVerificationPlan   = "release_verification_plan"
+	MethodCaptureVerificationPlan   = "capture_verification_plan"
+	MethodStartFreshRun             = "start_fresh_run"
+	MethodClaimLaunchReceipt        = "claim_launch_receipt"
+	MethodGetRun                    = "get_run"
+	MethodGetStepDiff               = "get_step_diff"
+	MethodGetRuns                   = "get_runs"
+	MethodGetRunsForHead            = "get_runs_for_head"
+	MethodGetActiveRun              = "get_active_run"
+	MethodRerun                     = "rerun"
+	MethodRetryRun                  = "retry_run"
+	MethodSubscribe                 = "subscribe"
+	MethodRespond                   = "respond"
+	MethodAnswerReview              = "answer_review_question"
+	MethodCancelRun                 = "cancel_run"
+	MethodHandoffRun                = "handoff_run"
+	MethodGateContext               = "gate_context"
+	MethodAdmitPush                 = "admit_push"
+	MethodHealth                    = "health"
+	MethodShutdown                  = "shutdown"
+	MethodUpdateRunClosingIssueRefs = "update_run_closing_issue_refs"
 )
 
 // JSON-RPC 2.0 error codes.
@@ -45,10 +51,11 @@ const (
 
 // Request is a JSON-RPC 2.0 request.
 type Request struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	ID      int64           `json:"id"`
+	JSONRPC          string          `json:"jsonrpc"`
+	Method           string          `json:"method"`
+	Params           json.RawMessage `json:"params,omitempty"`
+	ID               int64           `json:"id"`
+	DeadlineUnixNano int64           `json:"deadline_unix_nano,omitempty"`
 }
 
 // Response is a JSON-RPC 2.0 response.
@@ -97,6 +104,9 @@ type PushReceivedParams struct {
 	// branch, so the hook reports no previous head of its own. It is a claim the
 	// daemon accepts only against the gate's own archive tag.
 	ReconciledPreviousHead string `json:"reconciled_previous_head,omitempty"`
+	// ClosingIssueRefs are the explicit issues (axi run --closes) the
+	// generated PR should close.
+	ClosingIssueRefs []string `json:"closing_issue_refs,omitempty"`
 }
 
 // StartFreshRunParams requests a nonce-bound fresh launch for one exact gate
@@ -115,6 +125,7 @@ type StartFreshRunParams struct {
 	ValidationGeneration string           `json:"validation_generation"`
 	PRBaseBranch         string           `json:"pr_base_branch,omitempty"`
 	OmitIntent           bool             `json:"omit_intent,omitempty"`
+	ClosingIssueRefs     []string         `json:"closing_issue_refs,omitempty"`
 }
 
 // CaptureVerificationPlanParams requests a snapshot before the caller pushes.
@@ -211,6 +222,7 @@ type GetActiveRunParams struct {
 // Intent, when set, overrides inherited intent and fresh inference. When empty,
 // the daemon inherits authoritative intent from the selected prior run or
 // leaves the new run to perform fresh inference.
+// ClosingIssueRefs are merged with the selected run's persisted references.
 type RerunParams struct {
 	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
 	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
@@ -228,6 +240,29 @@ type RerunParams struct {
 	// CallerHeadSHA is a clean caller worktree's HEAD, when known. It guards
 	// the daemon's selected head; it never supplies a replacement run head.
 	CallerHeadSHA string `json:"caller_head_sha,omitempty"`
+	// ClosingIssueRefs are added to the references the selected run carried;
+	// a rerun never drops an inherited closing reference.
+	ClosingIssueRefs []string `json:"closing_issue_refs,omitempty"`
+}
+
+// RetryRunParams asks the daemon to continue a failed run from its failed
+// step. RunID must name the branch's latest run: it confirms the run the
+// caller inspected and never selects any other. CallerHeadSHA is the clean
+// caller worktree's HEAD; empty means the worktree was not clean.
+type RetryRunParams struct {
+	RepoID        string `json:"repo_id"`
+	Branch        string `json:"branch"`
+	RunID         string `json:"run_id"`
+	CallerHeadSHA string `json:"caller_head_sha,omitempty"`
+}
+
+// RetryRunResult names the run that continues the failed one and the step it
+// restarted, with the round of that step the failed run was in.
+type RetryRunResult struct {
+	RunID       string         `json:"run_id"`
+	SourceRunID string         `json:"source_run_id"`
+	Step        types.StepName `json:"step"`
+	SourceRound int            `json:"source_round"`
 }
 
 // SubscribeParams starts an event stream for a run.
@@ -235,21 +270,39 @@ type SubscribeParams struct {
 	RunID string `json:"run_id"`
 }
 
-// RespondParams sends a user action for a step awaiting approval.
+// RespondParams sends a gate action for a step awaiting approval.
 //
 // Instructions carries optional per-finding notes keyed by finding ID, which
 // the daemon attaches to the corresponding finding before dispatching a fix.
 // AddedFindings carries user-authored findings that are merged into the round
-// alongside agent-produced ones. Both fields only apply when Action triggers
-// a fix round.
+// alongside agent-produced ones. Instruction and AddedFindings only apply when
+// Action triggers a fix round.
+//
+// IgnoreFindingIDs are the gate's findings the response explicitly declines. A
+// fix response must account for every finding the gate shows: each one must be
+// in FindingIDs or IgnoreFindingIDs unless an earlier round of the same step
+// already decided it, and the daemon refuses the response (leaving the gate
+// parked) when one is left out. An omission is never a decline.
 type RespondParams struct {
-	RunID          string               `json:"run_id"`
-	Step           types.StepName       `json:"step"`
-	Action         types.ApprovalAction `json:"action"`
-	FindingIDs     []string             `json:"finding_ids,omitempty"`
-	Instructions   map[string]string    `json:"instructions,omitempty"`
-	AddedFindings  []types.Finding      `json:"added_findings,omitempty"`
-	ApprovalReason string               `json:"approval_reason,omitempty"` // Test approval only
+	Origin           types.ResponseOrigin `json:"origin,omitempty"`
+	Coverage         *CoverageBinding     `json:"coverage,omitempty"`
+	RunID            string               `json:"run_id"`
+	Step             types.StepName       `json:"step"`
+	Action           types.ApprovalAction `json:"action"`
+	FindingIDs       []string             `json:"finding_ids,omitempty"`
+	IgnoreFindingIDs []string             `json:"ignore_finding_ids,omitempty"`
+	Instructions     map[string]string    `json:"instructions,omitempty"`
+	// InstructionsFromDriver marks Instructions as an agent driver's fix
+	// guidance rather than the user's own words.
+	InstructionsFromDriver bool            `json:"instructions_from_driver,omitempty"`
+	AddedFindings          []types.Finding `json:"added_findings,omitempty"`
+	ApprovalReason         string          `json:"approval_reason,omitempty"` // Test approval, or the reason recorded with an abort
+}
+
+type CoverageBinding struct {
+	HeadSHA      string `json:"head_sha"`
+	StepResultID string `json:"step_result_id"`
+	RoundID      string `json:"round_id"`
 }
 
 // CancelRunParams cancels an active pipeline run.
@@ -275,6 +328,26 @@ type HealthParams struct{}
 
 // ShutdownParams has no fields but exists for consistency.
 type ShutdownParams struct{}
+
+// UpdateRunClosingIssueRefsParams updates the closing issue references on an existing run.
+type UpdateRunClosingIssueRefsParams struct {
+	RunID            string   `json:"run_id"`
+	ClosingIssueRefs []string `json:"closing_issue_refs"`
+}
+
+// ClosingIssueRefsRejectedPRBodyComposed is the Reason reported when the run's PR
+// body was already composed, so the closing issue references could no longer reach its
+// Issues section. It is a rejection rather than a transport error because retrying
+// cannot help: the caller must edit the PR or start a fresh run.
+const ClosingIssueRefsRejectedPRBodyComposed = "pr_body_already_composed"
+
+// UpdateRunClosingIssueRefsResult is the result of UpdateRunClosingIssueRefs. OK is false
+// for a refused update, with Reason naming why so the caller can give advice
+// that fits instead of matching on error prose.
+type UpdateRunClosingIssueRefsResult struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+}
 
 // --- Method results ---
 
@@ -329,9 +402,31 @@ type RerunResult struct {
 	RunID string `json:"run_id"`
 }
 
-// RespondResult confirms the action was accepted.
+// RespondResult confirms the action was accepted, or reports the dispositions
+// the response recorded and why a response was refused.
+//
+// The disposition fields are the daemon's echo of what it actually recorded, so
+// a driver sees a partial or inverted decision in the same call that made it
+// instead of two rounds later. Kept names the findings the response omitted
+// that an earlier round of the same step had already decided.
+//
+// A refusal is a result rather than a transport error because it is not a
+// transport failure: the gate is intact, the caller's response was wrong, and
+// the caller can correct it. Refusal is non-empty exactly when OK is false.
 type RespondResult struct {
-	OK bool `json:"ok"`
+	OK      bool     `json:"ok"`
+	Fixed   []string `json:"fixed,omitempty"`
+	Ignored []string `json:"ignored,omitempty"`
+	Kept    []string `json:"kept,omitempty"`
+	Refusal string   `json:"refusal,omitempty"`
+	Missing []string `json:"missing,omitempty"`
+	// DeclinedEarlierFix names the findings the response tried to decline that
+	// an earlier round of the same step already chose to fix. Reverting an
+	// applied fix is out of scope for a gate response, so the response was
+	// refused; a machine caller corrects it by omitting those findings to keep
+	// the earlier decision.
+	DeclinedEarlierFix []string `json:"declined_earlier_fix,omitempty"`
+	Help               string   `json:"help,omitempty"`
 }
 
 // AnswerReviewQuestionParams records one operator answer to a question the
@@ -360,7 +455,15 @@ type AnswerReviewQuestionResult struct {
 	Open    int      `json:"open"`
 	OpenIDs []string `json:"open_ids,omitempty"`
 	Resumed bool     `json:"resumed"`
-	Note    string   `json:"note,omitempty"`
+	// ClosedLast is true when this answer closed the last question that was
+	// open before it, whether or not a parked gate was there to release yet.
+	// It tells the caller the run is moving again because of this answer, so
+	// the caller follows it to the next decision point exactly as
+	// `axi respond` does. Resumed alone cannot say that: an answer that lands
+	// before the park registers resumes nothing itself, and the gate's own
+	// resumer releases that park when it registers.
+	ClosedLast bool   `json:"closed_last,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 // CancelRunResult confirms the run cancellation request was accepted.
@@ -419,6 +522,10 @@ type RunInfo struct {
 	// tighten-only request to keep the generated Intent section out of the
 	// PR body (see runs.omit_intent).
 	OmitIntent bool `json:"omit_intent,omitempty"`
+	// QuotaRouting is the run's quota-aware agent-ordering record (the raw
+	// quotarouting.Record JSON) when the feature is on for this run, empty
+	// otherwise. Local-only observability; see internal/quotarouting.
+	QuotaRouting string `json:"quota_routing,omitempty"`
 	// AwaitingAgent is true while the run is parked at a gate awaiting the
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both
@@ -432,6 +539,10 @@ type RunInfo struct {
 	// axi's outcome wording does not need to inspect every step itself.
 	CIOverrideReason   string `json:"ci_override_reason,omitempty"`
 	TestOverrideReason string `json:"test_override_reason,omitempty"`
+	// RetryOf links a run started by axi retry to the failed run it continues;
+	// RetriedBy names the run that continued this failed run.
+	RetryOf   *RunRetryInfo `json:"retry_of,omitempty"`
+	RetriedBy string        `json:"retried_by,omitempty"`
 	// StateRev is the monotonic run-state revision this snapshot is at least
 	// as new as. It is sampled before the database read, so every event at or
 	// below it is already reflected here and every event above it still
@@ -441,19 +552,31 @@ type RunInfo struct {
 	UpdatedAt int64 `json:"updated_at"`
 }
 
+// RunRetryInfo is the audit link from a continuation run to the failure it
+// continues: the failed run, its failed step and round, that step's error,
+// and the preserved head the continuation started from.
+type RunRetryInfo struct {
+	RunID             string         `json:"run_id"`
+	Step              types.StepName `json:"step"`
+	Round             int            `json:"round"`
+	Error             string         `json:"error"`
+	CheckpointHeadSHA string         `json:"checkpoint_head_sha"`
+}
+
 // WorkScopeDocumentLintHousekeeping identifies the one agent invocation that
 // performs both duties while its wall time is stored on the document step.
 const WorkScopeDocumentLintHousekeeping = "document+lint housekeeping"
 
 // StepResultInfo is the IPC representation of a step result.
 type StepResultInfo struct {
-	ID         string           `json:"id"`
-	RunID      string           `json:"run_id"`
-	StepName   types.StepName   `json:"step_name"`
-	StepOrder  int              `json:"step_order"`
-	Status     types.StepStatus `json:"status"`
-	ExitCode   *int             `json:"exit_code,omitempty"`
-	DurationMS *int64           `json:"duration_ms,omitempty"`
+	LatestRoundID string           `json:"latest_round_id,omitempty"`
+	ID            string           `json:"id"`
+	RunID         string           `json:"run_id"`
+	StepName      types.StepName   `json:"step_name"`
+	StepOrder     int              `json:"step_order"`
+	Status        types.StepStatus `json:"status"`
+	ExitCode      *int             `json:"exit_code,omitempty"`
+	DurationMS    *int64           `json:"duration_ms,omitempty"`
 	// WorkScope names shared work whose wall time is recorded on this logical
 	// step. For example, the document step can own one combined document+lint
 	// housekeeping invocation while lint only records the cached handoff.
