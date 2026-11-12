@@ -10,10 +10,19 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// errAgentCommitsNotLinear marks agent commits that are not a plain chain of
-// single-parent commits on the recorded head, so their messages cannot be
-// rewritten without restructuring history.
+// errAgentCommitsNotLinear marks agent commits that are not a chain on the
+// recorded head the pipeline can rewrite without restructuring history: single-
+// parent commits, plus at most one merge of the PR base branch that
+// verifyDefaultBranchMerge accepts.
 var errAgentCommitsNotLinear = errors.New("agent commits are not a linear chain from the recorded head")
+
+// agentChainCommit is one commit on the agent's first-parent chain above the
+// recorded head. mergedTip is the second parent of the one PR-base merge
+// the chain may carry, and empty for an ordinary single-parent commit.
+type agentChainCommit struct {
+	sha       string
+	mergedTip string
+}
 
 // conformAgentCommits applies the repository's commit settings to commits a fix
 // agent made itself. When the agent runs `git commit`, the worktree is clean and
@@ -23,11 +32,14 @@ var errAgentCommitsNotLinear = errors.New("agent commits are not a linear chain 
 // The rewrite is anchored to the head the run has recorded, the same anchor
 // assertPipelineHeadContinuity and ciHeadAwaitsRecording use: every commit above
 // sctx.Run.HeadSHA is work the pipeline has not recorded yet, including commits
-// an earlier failed agent turn left behind. Only a linear, non-merge chain on
-// that head is rewritten. Trees, authors and parents are kept (only the message
-// changes) and HEAD moves with a compare-and-swap against the head observed. An
-// unexpected shape or a git failure returns an error with the agent's commits
-// untouched, so the change is never dropped and never published unshaped.
+// an earlier failed agent turn left behind. Only a linear chain on that head is
+// rewritten, with one exception: a single merge that brings the PR base branch
+// in (verifyDefaultBranchMerge), which a fix round needs when the base moved
+// under the PR or conflicts with it. Trees, authors and parents (both of a
+// merge's) are kept, only the message changes, and HEAD moves with a
+// compare-and-swap against the head observed. An unexpected shape or a git
+// failure returns an error with the agent's commits untouched, so the change is
+// never dropped and never published unshaped.
 func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, render func() (string, error)) error {
 	anchor := strings.TrimSpace(sctx.Run.HeadSHA)
 	if anchor == "" {
@@ -44,9 +56,8 @@ func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, re
 	if rebaseInProgress(sctx.Ctx, sctx.WorkDir) {
 		return nil
 	}
-	// The caller's commit would conclude an unfinished merge into a merge commit,
-	// the non-linear shape refused below, with the agent's own commits above the
-	// recorded head still unshaped.
+	// Do not let the caller conclude a merge whose topology and second parent
+	// have not been verified, leaving the agent's earlier commits unshaped.
 	if mergeInProgress(sctx.Ctx, sctx.WorkDir) {
 		return fmt.Errorf("%s agent left a merge unfinished: %w; refusing to publish agent commits that bypass the commit settings", stepName, errAgentCommitsNotLinear)
 	}
@@ -70,7 +81,8 @@ func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, re
 
 	parent, changed := anchor, false
 	published, resolvedPublished := -1, false
-	for i, sha := range chain {
+	for i, commit := range chain {
+		sha := commit.sha
 		info, err := stepGitRun(sctx, "show", "-s", "--date=raw", "--format=%T%x1f%an%x1f%ae%x1f%ad%x1f%B", sha)
 		if err != nil {
 			return fmt.Errorf("read %s agent commit %s: %w", stepName, sha, err)
@@ -98,7 +110,11 @@ func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, re
 		}
 		changed = true
 		env := []string{"GIT_AUTHOR_NAME=" + fields[1], "GIT_AUTHOR_EMAIL=" + fields[2], "GIT_AUTHOR_DATE=" + fields[3]}
-		parent, err = stepGitRunEnv(sctx, env, "commit-tree", fields[0], "-p", parent, "-m", message)
+		args := []string{"commit-tree", fields[0], "-p", parent}
+		if commit.mergedTip != "" {
+			args = append(args, "-p", commit.mergedTip)
+		}
+		parent, err = stepGitRunEnv(sctx, env, append(args, "-m", message)...)
 		if err != nil {
 			return fmt.Errorf("rewrite %s agent commit %s: %w", stepName, sha, err)
 		}
@@ -118,7 +134,7 @@ func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, re
 // records its head, so other steps skip the remote query. A query failure is
 // an error: the commits are then left untouched rather than risk rewriting
 // published history.
-func publishedChainIndex(sctx *pipeline.StepContext, stepName types.StepName, chain []string) (int, error) {
+func publishedChainIndex(sctx *pipeline.StepContext, stepName types.StepName, chain []agentChainCommit) (int, error) {
 	if stepName != types.StepCI {
 		return -1, nil
 	}
@@ -130,8 +146,8 @@ func publishedChainIndex(sctx *pipeline.StepContext, stepName types.StepName, ch
 	if err != nil {
 		return -1, fmt.Errorf("check which %s agent commits are already published: %w", stepName, err)
 	}
-	for i, sha := range chain {
-		if strings.EqualFold(sha, tip) {
+	for i, commit := range chain {
+		if strings.EqualFold(commit.sha, tip) {
 			return i, nil
 		}
 	}
@@ -149,25 +165,93 @@ func headDescendsFrom(sctx *pipeline.StepContext, anchor, head string) (bool, er
 	return err == nil, err
 }
 
-// agentCommitChain lists the commits in anchor..head oldest first and
-// requires them to be a single-parent chain that starts at anchor.
-func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]string, error) {
-	out, err := stepGitRun(sctx, "rev-list", "--reverse", "--parents", anchor+".."+head)
+// agentCommitChain lists the first-parent commits in anchor..head oldest first
+// and requires them to be a chain that starts at anchor: single-parent commits,
+// plus at most one two-parent merge that verifyDefaultBranchMerge accepts. Every
+// other shape - a second merge, an octopus, a merge of anything but the PR base
+// branch, or one whose first parent leaves the chain - is refused.
+func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]agentChainCommit, error) {
+	out, err := stepGitRun(sctx, "rev-list", "--first-parent", "--reverse", "--parents", anchor+".."+head)
 	if err != nil {
 		return nil, err
 	}
-	var chain []string
-	parent := anchor
+	refuse := func(reason string) error {
+		if reason != "" {
+			reason = " (" + reason + ")"
+		}
+		return fmt.Errorf("commits %s..%s: %w%s; refusing to publish agent commits that bypass the commit settings", anchor, head, errAgentCommitsNotLinear, reason)
+	}
+	var chain []agentChainCommit
+	parent, merged := anchor, false
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 2 || fields[1] != parent {
-			return nil, fmt.Errorf("commits %s..%s: %w; refusing to publish agent commits that bypass the commit settings", anchor, head, errAgentCommitsNotLinear)
+		if len(fields) < 2 || fields[1] != parent {
+			return nil, refuse("")
 		}
-		chain = append(chain, fields[0])
+		commit := agentChainCommit{sha: fields[0]}
+		switch len(fields) {
+		case 2:
+		case 3:
+			if merged {
+				return nil, refuse("more than one merge")
+			}
+			if reason, err := verifyDefaultBranchMerge(sctx, fields[0], fields[2]); err != nil {
+				return nil, fmt.Errorf("inspect merge %s: %w", fields[0], err)
+			} else if reason != "" {
+				return nil, refuse(reason)
+			}
+			commit.mergedTip, merged = fields[2], true
+		default:
+			return nil, refuse("an octopus merge")
+		}
+		chain = append(chain, commit)
 		parent = fields[0]
 	}
 	if parent != head {
 		return nil, fmt.Errorf("commits %s..%s do not end at the observed head", anchor, head)
 	}
 	return chain, nil
+}
+
+func verifyDefaultBranchMerge(sctx *pipeline.StepContext, merge, second string) (string, error) {
+	host, reason := buildHost(sctx, resolvedProvider(sctx))
+	if host == nil {
+		return "", fmt.Errorf("discover PR base branch to verify the merge: %s", reason)
+	}
+	if err := host.Available(sctx.Ctx); err != nil {
+		return "", fmt.Errorf("check host before verifying the merge: %w", err)
+	}
+	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+	pr, err := host.FindPR(sctx.Ctx, branch, "")
+	if err != nil {
+		return "", fmt.Errorf("discover PR base branch to verify the merge: %w", err)
+	}
+	pr, err = bindExistingPR(sctx, host, pr)
+	if err != nil {
+		return "", fmt.Errorf("bind PR before verifying the merge: %w", err)
+	}
+	if owned := runPRURL(sctx); owned != "" && !samePRIdentity(owned, pr) {
+		return "", fmt.Errorf("branch PR %q does not match recorded PR %q; cannot verify the merge", describePR(pr), owned)
+	}
+	base := effectivePRBaseBranch(sctx)
+	if pr != nil {
+		base = strings.TrimSpace(pr.BaseBranch)
+		if base == "" {
+			return "", fmt.Errorf("PR base branch is empty; cannot verify the merge")
+		}
+	}
+	tip, resolved := resolveRunDefaultBranchTip(sctx.Ctx, sctx, "", base)
+	if !resolved || tip == "" {
+		return "", fmt.Errorf("fetch the remote %s branch to verify the merge", base)
+	}
+	if second != tip {
+		contained, err := headDescendsFrom(sctx, second, tip)
+		if err != nil {
+			return "", err
+		}
+		if !contained {
+			return fmt.Sprintf("merge %s brings in %s, which is not on the remote %s branch (tip %s)", shortSHA(merge), shortSHA(second), base, shortSHA(tip)), nil
+		}
+	}
+	return "", nil
 }

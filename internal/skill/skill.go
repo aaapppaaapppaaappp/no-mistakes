@@ -275,7 +275,7 @@ Run the pipeline and decide on its findings as they come up:
      ` + "`no-mistakes axi handoff`" + ` to end green monitoring after handing
      the open PR to human reviewers, or let the configured idle timeout elapse.
      Under the opt-in ` + "`ci.release_after_checks_pass`" + ` the run instead finishes at
-     the verdict: ` + "`run.status`" + ` is ` + "`checks_passed`" + `, the run released its worktree,
+     the verdict, and a still-green run whose idle timeout elapses finishes the same way: ` + "`run.status`" + ` is ` + "`checks_passed`" + `, the run released its worktree,
      and nothing is left watching the PR.
      An update it needs later is a fresh ` + "`no-mistakes axi run`" + ` on the updated head;
      this run will not rebase or re-push it.
@@ -341,8 +341,9 @@ The CI step deliberately keeps watching the PR after checks pass, so
 ` + "`axi run`" + ` returns ` + "`checks-passed`" + ` the moment checks are green (or a trusted
 ` + "`no_ci: true`" + ` declaration covers a zero-check repository) rather than
 blocking on the human merge. Never poll or re-run waiting for the merge yourself.
-That monitor is live by default; only the opt-in
-` + "`ci.release_after_checks_pass`" + ` finishes the run at the verdict instead.
+That monitor is live by default; the opt-in
+` + "`ci.release_after_checks_pass`" + ` finishes the run at the verdict instead, and a
+green run whose idle timeout elapses finishes the same way.
 Never treat "no CI checks reported" alone as green.
 
 Because that monitor stays live by default, a PR that falls behind the default branch or

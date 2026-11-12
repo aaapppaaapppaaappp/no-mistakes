@@ -907,7 +907,7 @@ Continuity is proven when the repaired head is the run's durably review-approved
 
 CI repair publication uses the same settlement order as Push. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the publication and retry behavior.
 
-**Merge-conflict repairs always revalidate, under either setting.** They are not carved out - they simply always land in the cannot-be-proven half. A conflict repair rebases, so the repaired head is never a descendant of the reviewed head; resolving a conflict changes the commit's patch-id; and no content-based guard can separate "rebased and resolved" from "dropped the work". Revalidating is what keeps that safe: the rewritten head is not published until Review has approved it, so the reviewed commits stay on the remote in the meantime. The opt-in [`ci.carry_review_on_replay`](#cicarry_review_on_replay) narrows only where that revalidation starts, and only for a rebase it can prove replayed the reviewed commits unchanged with no conflict: such a repair still revalidates, from Test.
+**A repair that rebases revalidates, under either setting.** CI merge-conflict repairs are instructed to rebase, so they normally land in the cannot-be-proven half: the repaired head is not a descendant of the reviewed head, and no content-based guard can separate "rebased and resolved" from "dropped the work". Revalidating is what keeps that safe: the rewritten head is not published until Review has approved it, so the reviewed commits stay on the remote in the meantime. The opt-in [`ci.carry_review_on_replay`](#cicarry_review_on_replay) narrows only where that revalidation starts, and only for a rebase it can prove replayed the reviewed commits unchanged with no conflict: such a repair still revalidates, from Test. If a fix agent instead returns a base-branch merge accepted under the [fix-commit rules](/no-mistakes/reference/pipeline-steps/), it preserves the reviewed head's ancestry and follows the ordinary repair rule above: `false` permits guarded publication when continuity is proven; `true` requires revalidation.
 
 Provenance is deliberately not accepted as a substitute for that proof. In the reproduction this rule exists for, the repair that deleted a reviewed commit was authored by no-mistakes' own CI repair agent: it reset to the rebase base, left a clean tree, and the pipeline reported success while the remote lost the work. Who wrote a repair says nothing about what it did to the reviewed commits.
 
@@ -1010,7 +1010,7 @@ ci:
   carry_review_on_replay: true
 ```
 
-A merge-conflict repair, or a [`ci.rebase_behind`](#cirebase_behind) rebase, rewrites every branch commit, so continuity with the reviewed head cannot be shown by ancestry and the repair [revalidates from Review](#cirevalidate_repairs). Often the rebase changed nothing the reviewer looked at: the base moved, the branch's own commits replayed on top of it unchanged, and the full Review pass only re-approves the same diff.
+A rebase used to repair a merge conflict or a [`ci.rebase_behind`](#cirebase_behind) condition rewrites the branch commits, so continuity with the reviewed head cannot be shown by ancestry and the repair [revalidates from Review](#cirevalidate_repairs). Often the rebase changed nothing the reviewer looked at: the base moved, the branch's own commits replayed on top of it unchanged, and the full Review pass only re-approves the same diff.
 
 - **`false` (default)** keeps that behavior exactly: every rebase repair revalidates from Review.
 - **`true`** first checks whether the repaired head is a **pure replay** of the reviewed head onto the base tip the repair targeted. If it is, the run's review approval moves to the replayed head and validation restarts at **Test**: Test, Document, Lint, Push, PR, and CI all run again against the new base, and only Review is not repeated. If it is not, the repair revalidates from Review as it would with the key off.
@@ -1040,7 +1040,7 @@ A value set here wins over the operator's own [`ci.carry_review_on_replay`](/no-
 
 ### ci.release_after_checks_pass
 
-Whether the CI step finishes the run at its checks verdict instead of monitoring the pull request until it is merged, closed, declined, or handed off.
+Whether the CI step finishes the run at its checks verdict instead of continuing the merge watch governed by [`ci_timeout`](/no-mistakes/reference/global-config/#ci_timeout).
 
 | | |
 |---|---|
@@ -1053,7 +1053,7 @@ ci:
   release_after_checks_pass: true
 ```
 
-- **`false` (default)** is what the step has always done: once every check is green the run records readiness and keeps watching the PR until it is merged, closed, or declined, unless an operator explicitly hands off the green monitor; a later base-branch advance or conflict is still repaired on its own.
+- **`false` (default)** records readiness and continues monitoring the PR under the [CI step rules](/no-mistakes/reference/pipeline-steps/#ci); the [`ci_timeout` reference](/no-mistakes/reference/global-config/#ci_timeout) owns idle completion and approval gates.
 - **`true`** finishes the step at that point. The run completes with the `checks_passed` status, releases its worktree, and reports `outcome: checks-passed`; whether and when the PR is merged is then the user's decision, and nothing observes the merge afterwards, so the recorded CI duration stops at the checks verdict instead of including the wait for a merge.
 
 This value is read only from the trusted default-branch copy of this file, like the rest of the `ci` block: a pushed branch cannot opt itself into the shorter run, or out of it.
@@ -1107,7 +1107,7 @@ The two differ in what survives the integration, which matters in three places:
 | Evidence of what a conflict resolution did | none; the result is just commits | the merge commit's two parents and their merge base |
 | Cost | none | one merge commit per integration |
 
-Integration publishes as a fast-forward under `merge`. A CI merge-conflict repair is the exception: it rebases onto the base branch whichever strategy is set, so that repair still force-pushes and still revalidates in full.
+Integration publishes as a fast-forward under `merge`. CI merge-conflict repairs are instructed to rebase whichever strategy is set; the [CI repair rules](#cirevalidate_repairs) own their publication and revalidation behavior.
 
 **Continuity.** The CI step publishes a repair without a full revalidation cycle only when it can prove the repaired head continues the reviewed head (see [`ci.revalidate_repairs`](#cirevalidate_repairs)). Under `merge` that proof is plain ancestry, because the reviewed head is a parent. Under `rebase` there is nothing to prove it with.
 

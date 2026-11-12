@@ -41,6 +41,7 @@ agent_args_override:
 
 ci_timeout: "168h"
 
+
 step_quiet_warning: "10m"
 
 agent_timeout: "30m"
@@ -723,15 +724,19 @@ Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
 
 This is an idle timeout, not an absolute deadline: every time the base branch advances, the monitor re-arms it.
 So an actively-updated green PR keeps its monitor no matter how long it stays open; under [`ci.release_after_checks_pass`](#cirelease_after_checks_pass) that watch ends at the checks verdict instead.
-If it later develops an actual merge conflict (on GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, or a provider plugin declaring `mergeable_state`), the CI auto-fix path rebases it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and publishes it through Push.
+If it later develops an actual merge conflict, the [CI repair rules](/no-mistakes/reference/repo-config/#cirevalidate_repairs) govern publication and revalidation on supported providers.
 A clean behind PR needs no command, except on GitHub when the base requires up-to-date branches (`mergeStateStatus: BEHIND`): that PR waits for a human to bring it up to date, unless [`ci.rebase_behind`](#cirebase_behind) is on.
-A genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.
+On GitHub, and on GitLab when its adapter reports a runner queue state, each poll that sees a queued check re-arms the idle timeout, so monitoring keeps waiting until it starts. Other forges keep the plain `ci_timeout` without queue-based rearming.
+Once CI readiness is established (all checks green, or trusted [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no checks registered) and known mergeability is clear, an elapsing timeout ends the merge watch as passed: the step completes with readiness recorded, the run ends as `checks_passed` exactly as under `ci.release_after_checks_pass`, and the PR is left for a human to merge, with no approval gate (a pending `no-mistakes axi handoff` keeps its own path).
+If the PR remains open without readiness, the expired timeout still parks at an approval gate: checks may have started and never finished, no checks may be registered without a trusted `no_ci` declaration, or provider state may be unknown. Known failures, a merge conflict, or unresolved mergeability produce findings describing the remaining issues.
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
 If the PR is merged or closed externally, the stale gate completes automatically; an open, unknown, or temporarily unreachable PR remains parked for a user decision.
 
 Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to disable this timeout. A run still ends when the PR is merged, closed, or declined, when green monitoring is explicitly handed off, or at readiness under `ci.release_after_checks_pass`. You can end it explicitly with `no-mistakes axi handoff` or cancel it with `no-mistakes axi abort --run <id>`.
 
 Legacy alias: `babysit_timeout`.
+
+Queue-based rearming requires an adapter-identified run in `QUEUED` or `PENDING`, such as a GitHub check run in `QUEUED` or a GitLab job pending for a runner. Generic commit statuses, GitHub status contexts, and GitLab external status checks keep the ordinary timeout, including when they report `PENDING`. GitHub `WAITING` does not rearm the timeout because it can require deployment approval; GitLab `created` does not rearm it because the job can be waiting behind a manual stage. Other states, running checks, checks held for a person (a maintainer approval or a blocking manual job), and required external reviews do not rearm it either.
 
 ### step_quiet_warning
 
@@ -1368,7 +1373,7 @@ Entries are limited to 1,024 bytes and 16 placeholders, the list to 16 entries, 
 The 1,024-byte limit also applies to the rendered line, checked when configuration loads with every placeholder at its 64-byte maximum, so an entry that loads cannot overflow at commit time.
 An invalid entry fails configuration loading, and a render failure at commit time leaves the changes unstaged.
 
-Trailers are added to Review, Test, Document, and Lint fix commits, operator-authorized repository gate repairs, and CI repair commits. Commits that no single invocation produced get none rather than a guessed agent: the Push step's catch-all commit, a CI repair retried after a protected-path refusal, and rebase or merge commits that an agent writes itself.
+Trailers are added to Review, Test, Document, and Lint fix commits, operator-authorized repository gate repairs, and CI repair commits. Commits that no single invocation produced get none rather than a guessed agent: the Push step's catch-all commit, a CI repair retried after a protected-path refusal, commits an agent rebased itself, and the merge commits the Rebase step's conflict resolver writes. A fix agent's own commits in a fix round, including a merge of the PR base branch, are rewritten to the fix message and these trailers ([Pipeline Steps](/no-mistakes/reference/pipeline-steps/)).
 A per-repo [`commit.trailers`](/no-mistakes/reference/repo-config/#committrailers) list or a matching [`repository_overrides`](#repository_overrides) entry replaces this list rather than extending it; an empty list clears it.
 
 ### pr.appendix

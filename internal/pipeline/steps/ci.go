@@ -42,13 +42,12 @@ const (
 // findings machinery. With ci.release_after_checks_pass it instead finishes the
 // run at the checks verdict.
 //
-// By default the green observation only clears the failure signal: the monitor
-// keeps watching the PR, so the run stays open and a later base-branch advance
-// is still repaired on its own. That is also why the recorded step duration
-// includes merge-waiting time. The opt-in release finishes the step there
-// instead, recording readiness and completing the run with the terminal
-// checks_passed status, which releases its worktree and lane and leaves the
-// merge decision to a human.
+// Before the idle deadline, a green observation normally clears the failure
+// signal while monitoring continues. The recorded step duration therefore
+// includes merge-waiting time. The opt-in release finishes at readiness; an
+// expired green merge watch takes the same release path. Both record readiness
+// and complete the run with the terminal checks_passed status, releasing its
+// worktree and lane and leaving the merge decision to a human.
 //
 // Execute has the same shape as the review step's: when the executor
 // re-executes it as a fix round (sctx.Fixing), it first repairs the findings
@@ -422,19 +421,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		return nil, fmt.Errorf("extract PR number: %w", err)
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
-	if retryRefusal {
-		if err := clearCIMonitorReadyForIssues(sctx); err != nil {
-			return nil, err
-		}
-		repair, err := s.retryProtectedPathRepair(sctx)
-		if err != nil {
-			return nil, err
-		}
-		retryRefusal = false
-		if repair.Revalidate {
-			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom()}, nil
-		}
-	}
 	baseBranch := effectivePRBaseBranch(sctx)
 	// A resumed run may have a different trusted configuration than the run
 	// that created this PR. Re-read the forge record without a base filter so
@@ -451,6 +437,19 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}
 	if strings.TrimSpace(pr.BaseBranch) != "" {
 		baseBranch = strings.TrimSpace(pr.BaseBranch)
+	}
+	if retryRefusal {
+		if err := clearCIMonitorReadyForIssues(sctx); err != nil {
+			return nil, err
+		}
+		repair, err := s.retryProtectedPathRepair(sctx)
+		if err != nil {
+			return nil, err
+		}
+		retryRefusal = false
+		if repair.Revalidate {
+			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom()}, nil
+		}
 	}
 	if repairRequested {
 		repairOutcome, err := s.repairFromFindings(sctx, host, pr)
@@ -492,7 +491,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	if timeout == 0 {
 		timeout = config.DefaultCITimeout
 	}
-
 	releaseAfterChecksPass := ciReleaseAfterChecksPass(sctx)
 	if releaseAfterChecksPass {
 		sctx.Log(fmt.Sprintf("monitoring CI for PR #%s until every check is green...", prNumber))
@@ -541,8 +539,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				return nil, err
 			}
 		}
-		sctx.Log("CI timeout reached")
 		var outcome *pipeline.StepOutcome
+		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
 			outcome = ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present")
 		} else if mergeabilityBlockedReason != "" {
@@ -600,16 +598,16 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		botCommentReadFailed := false
 		behindObserved := false
 
-		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
-			return timeoutOutcome()
-		}
+		// A passed deadline does not end the monitor before this poll: the
+		// poll is what tells an expired idle window apart from a check still
+		// queued for a runner (which re-arms it) and from a green head (which
+		// ends the step as checks passed). Only what is left after it parks.
+		deadlinePassed := !unlimited && now().Sub(timeoutAnchor) >= timeout
 
 		// Re-arm the timeout whenever the base branch advances.
-		if !unlimited {
+		if !unlimited && !deadlinePassed {
 			resolveWindow := defaultBaseBranchTipResolveWindow
-			if remaining := timeout - now().Sub(timeoutAnchor); remaining <= 0 {
-				return timeoutOutcome()
-			} else if remaining < resolveWindow {
+			if remaining := timeout - now().Sub(timeoutAnchor); remaining < resolveWindow {
 				resolveWindow = remaining
 			}
 			tipCtx, cancel := context.WithTimeout(ctx, resolveWindow)
@@ -627,9 +625,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		}
 
-		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
-			return timeoutOutcome()
-		}
+		deadlinePassed = !unlimited && now().Sub(timeoutAnchor) >= timeout
 
 		// Check PR state (merged/closed -> exit)
 		prStateKnown := true
@@ -866,6 +862,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				}
 			}
 
+			if queued := queuedCheckNames(checks); len(queued) > 0 && !unlimited && (provider == scm.ProviderGitHub || provider == scm.ProviderGitLab) {
+				if deadlinePassed {
+					sctx.Log(fmt.Sprintf("CI timeout re-armed: %s still queued for a runner", strings.Join(queued, ", ")))
+				}
+				timeoutAnchor = now()
+				deadlinePassed = false
+			}
+
 			if hasIssues || len(awaitingRerun) > 0 {
 				if err := clearCIMonitorReadyForIssues(sctx); err != nil {
 					return nil, err
@@ -1039,13 +1043,21 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// stays open until the PR is merged, closed, or declined.
 					// ci.release_after_checks_pass opts into finishing here
 					// instead, which records the checks verdict and releases the
-					// run's worktree and lane.
-					if releaseAfterChecksPass {
+					// run's worktree and lane. A merge watch whose idle window
+					// has run out ends the same way: every check is green, and
+					// a PR still waiting for a human to merge it is not a
+					// failure to put in front of anyone. A pending handoff keeps
+					// its own timeout path below.
+					releaseAtDeadline := deadlinePassed && !handoffPending(sctx)
+					if releaseAfterChecksPass || releaseAtDeadline {
 						completeMsg := ciChecksPassedCompleteMsg
 						if declaredNoCI {
 							completeMsg = ciNoChecksPassedCompleteMsg
 						}
 						sctx.Log(completeMsg)
+						if !releaseAfterChecksPass {
+							sctx.Log(fmt.Sprintf("CI timeout reached with every check green: the merge watch ends here (ci_timeout: %s)", timeout))
+						}
 						sctx.Log("validation complete: releasing the run now; the PR is ready for a human to merge")
 						return &pipeline.StepOutcome{CIReadyNoCI: &declaredNoCI}, nil
 					}
@@ -1072,6 +1084,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		if !behindObserved {
 			behindBaseTip = ""
+		}
+		if deadlinePassed {
+			return timeoutOutcome()
 		}
 		woken, err := waitForPoll()
 		if err != nil {

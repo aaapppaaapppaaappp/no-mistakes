@@ -85,6 +85,18 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	return normalizePRState(got.State), nil
 }
 
+func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
+	id, err := strconv.Atoi(pr.Number)
+	if err != nil {
+		return "", err
+	}
+	got, err := h.client.GetPR(ctx, h.repo, id)
+	if err != nil {
+		return "", err
+	}
+	return got.BaseBranch, nil
+}
+
 func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	id, err := strconv.Atoi(pr.Number)
 	if err != nil {
@@ -226,8 +238,9 @@ func (h *Host) toPR(pr *PullRequest) *scm.PR {
 		return nil
 	}
 	return &scm.PR{
-		Number: strconv.Itoa(pr.ID),
-		URL:    prURL(h.repo, pr.ID, pr.URL),
+		Number:     strconv.Itoa(pr.ID),
+		URL:        prURL(h.repo, pr.ID, pr.URL),
+		BaseBranch: pr.BaseBranch,
 	}
 }
 

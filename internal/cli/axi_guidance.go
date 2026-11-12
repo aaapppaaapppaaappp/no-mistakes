@@ -18,10 +18,11 @@ const staleMonitorGuidance = "If this PR later falls behind the default branch o
 // releasedChecksPassedGuidance is the canonical, point-of-use guidance an agent
 // reads when `axi run` returns the terminal `checks-passed` outcome: the run
 // reached its validation verdict and released the branch, so no monitor is left
-// watching the PR and the merge is entirely the user's decision. Only the
-// opt-in `ci.release_after_checks_pass` produces this shape; the default
-// behaviour keeps monitoring and carries staleMonitorGuidance instead.
-const releasedChecksPassedGuidance = "This run is finished: it validated the head and released the branch, so nothing is left watching the PR and the merge decision is the user's. If the PR later falls behind the default branch or conflicts before it is merged, this run will not rebase or re-push it - update the branch and start a fresh `no-mistakes axi run` on the updated head instead. This shape only exists when the operator enabled `ci.release_after_checks_pass`; without it the run keeps watching a green PR until it is merged."
+// watching the PR and the merge is entirely the user's decision. The opt-in
+// `ci.release_after_checks_pass` produces this shape at the verdict, and a
+// green monitor whose ci_timeout elapses produces it then; until either, the
+// default behaviour keeps monitoring and carries staleMonitorGuidance instead.
+const releasedChecksPassedGuidance = "This run is finished: it validated the head and released the branch, so nothing is left watching the PR and the merge decision is the user's. If the PR later falls behind the default branch or conflicts before it is merged, this run will not rebase or re-push it - update the branch and start a fresh `no-mistakes axi run` on the updated head instead. This shape exists when the operator enabled `ci.release_after_checks_pass`, or once a green PR's monitor reached its `ci_timeout`; until then the run keeps watching a green PR until it is merged."
 
 // preserveGateFixCommitsGuidance is the canonical, point-of-use guidance an
 // agent reads when it needs to make another fix after a gate round already

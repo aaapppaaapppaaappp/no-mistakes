@@ -344,6 +344,14 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	return normalizePRState(got.Status), nil
 }
 
+func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
+	got, err := h.showPR(ctx, pr)
+	if err != nil {
+		return "", err
+	}
+	return h.toPR(got).BaseBranch, nil
+}
+
 func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	id := h.prID(pr)
 	if id == "" {

@@ -469,6 +469,14 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	return normalizeGiteaPRState(view.State), nil
 }
 
+func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
+	view, err := h.viewPR(ctx, pr.Number)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(view.Base), nil
+}
+
 // GetMergeableState is unsupported: see the Capabilities doc comment.
 func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.MergeableState, error) {
 	return "", scm.ErrUnsupported

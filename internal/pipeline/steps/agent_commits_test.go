@@ -32,6 +32,7 @@ func agentCommitContext(t *testing.T, trailers []string) (*pipeline.StepContext,
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "claude"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.Commit = config.Commit{Trailers: trailers}
+	sctx.Env = fakeCIGH(t, "OPEN", "[]")
 	return sctx, dir, headSHA
 }
 

@@ -68,6 +68,8 @@ func handleFakeCLI(mode string) {
 		fakeGlabHandler(args)
 	case "record-success":
 		fakeRecordSuccessHandler()
+	case "pr-discovery":
+		fakePRDiscoveryHandler(args)
 	case "git-passthrough":
 		fakeGitPassthroughHandler(args)
 	case "git-move-head-passthrough":
@@ -112,6 +114,76 @@ func handleFakeCLI(mode string) {
 	default:
 		os.Exit(1)
 	}
+}
+
+func fakePRDiscoveryHandler(args []string) {
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--help") {
+		os.Exit(0)
+	}
+	if strings.HasPrefix(joined, "auth status") || strings.HasPrefix(joined, "extension show ") ||
+		strings.HasPrefix(joined, "devops project list ") || strings.HasPrefix(joined, "api ") && strings.HasSuffix(joined, " /user") {
+		os.Exit(0)
+	}
+	if strings.HasPrefix(joined, "status ") {
+		fmt.Println(os.Getenv("FAKE_CLI_STATUS_JSON"))
+		os.Exit(0)
+	}
+	if strings.HasPrefix(joined, "pr view ") && strings.Contains(joined, "--json state") {
+		state := os.Getenv("FAKE_CLI_PR_STATE")
+		if state == "" {
+			state = "OPEN"
+		}
+		fmt.Println(state)
+		os.Exit(0)
+	}
+	if strings.HasPrefix(joined, "pr view ") && strings.Contains(joined, "--json baseRefName") {
+		fmt.Println(os.Getenv("FAKE_CLI_PR_BASE"))
+		os.Exit(0)
+	}
+	if strings.HasPrefix(joined, "pr view ") || strings.HasPrefix(joined, "mr view ") || strings.HasPrefix(joined, "repos pr show ") {
+		if message := os.Getenv("FAKE_CLI_PR_DETAIL_ERR"); message != "" {
+			fmt.Fprintln(os.Stderr, message)
+			os.Exit(1)
+		}
+		if number := os.Getenv("FAKE_CLI_PR_DETAIL_NUMBER"); number != "" {
+			found := false
+			for _, arg := range args {
+				found = found || arg == number
+			}
+			if !found {
+				fmt.Fprintln(os.Stderr, "unexpected PR detail number")
+				os.Exit(1)
+			}
+		}
+		payload := os.Getenv("FAKE_CLI_PR_DETAIL_JSON")
+		if payload == "" {
+			payload = os.Getenv("FAKE_CLI_PR_LIST_JSON")
+		}
+		var items []json.RawMessage
+		if err := json.Unmarshal([]byte(payload), &items); err == nil && len(items) > 0 {
+			payload = string(items[0])
+		}
+		fmt.Println(payload)
+		os.Exit(0)
+	}
+	for _, flag := range []string{"--base", "--target-branch"} {
+		if _, ok := fakeCLIFlagValue(args, flag); ok {
+			fmt.Fprintln(os.Stderr, "PR discovery must not filter by base")
+			os.Exit(1)
+		}
+	}
+	if message := os.Getenv("FAKE_CLI_PR_LIST_ERR"); message != "" {
+		fmt.Fprintln(os.Stderr, message)
+		os.Exit(1)
+	}
+	if !strings.HasPrefix(joined, "pr list ") && !strings.HasPrefix(joined, "mr list ") &&
+		!strings.HasPrefix(joined, "pr find ") && !strings.HasPrefix(joined, "repos pr list ") {
+		fmt.Fprintln(os.Stderr, "unexpected PR discovery command")
+		os.Exit(1)
+	}
+	fmt.Println(os.Getenv("FAKE_CLI_PR_LIST_JSON"))
+	os.Exit(0)
 }
 
 func logFakeCLIStdinBody(args []string, logFile string) {
@@ -738,6 +810,10 @@ func fakeCIGHHandler(args []string) {
 		}
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
+		fmt.Println(os.Getenv("FAKE_CLI_PR_BASE"))
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid") {
 		fmt.Println(fakePRHeadSHA())
 		os.Exit(0)
@@ -1343,7 +1419,11 @@ func printFakeCommitChecks(raw string, args []string) {
 			}
 		}
 		if check.Bucket == "pending" {
-			status = "IN_PROGRESS"
+			// An explicit status (QUEUED, WAITING) models a check run that has
+			// not started; without one a pending check is running.
+			if check.Status == "" {
+				status = "IN_PROGRESS"
+			}
 			conclusion = ""
 		}
 		link := check.Link

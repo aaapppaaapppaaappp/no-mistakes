@@ -2637,18 +2637,18 @@ func (e *Executor) completeRunWithStatus(run *db.Run, repo *db.Repo, status type
 
 // terminalRunStatus decides which success status a finished run records.
 //
-// A run whose CI step took the opt-in release path (ci.release_after_checks_pass)
-// did not merely complete: it reached its validation verdict and deliberately
-// stopped observing the PR, so it records checks_passed. That keeps the outcome
-// honest - a caller can tell "checks passed, waiting on a human merge decision"
+// A run whose CI step took the release path (ci.release_after_checks_pass, or a
+// green monitor whose ci_timeout elapsed) reached its validation verdict and
+// deliberately stopped observing the PR, so it records checks_passed. That
+// keeps the outcome honest - a caller can tell "checks passed, waiting on a human merge decision"
 // apart from a run that ended because the PR merged or closed - and keeps it
 // stable, because the merge decision was never this run's to observe.
 //
 // The verdict is read from the durable marker the release path stamps when it
 // completes the CI step, not inferred from readiness. A run that only monitored
 // the PR also records readiness, and can end with an open PR after a timeout
-// gate is approved, so readiness alone would claim the opt-in verdict for a run
-// whose default behaviour never changed.
+// gate is approved, so readiness alone would claim a release verdict for a run
+// that never took a release path.
 func (e *Executor) terminalRunStatus(run *db.Run) (types.RunStatus, error) {
 	if run == nil {
 		return "", fmt.Errorf("cannot complete a nil run")

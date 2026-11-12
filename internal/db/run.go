@@ -45,9 +45,8 @@ type Run struct {
 	CIReadyAt             *int64
 	CIReadyNoCI           bool
 	// CIReleasedAt is non-nil once the CI step finished at its checks-passed
-	// verdict under ci.release_after_checks_pass, releasing the run there. It
-	// is the durable record of that opt-in path, so the run's terminal status
-	// never reads as checks_passed for a run that only monitored the PR.
+	// verdict, releasing the run there. Readiness alone is insufficient: a run
+	// may record readiness while it is still monitoring the PR.
 	CIReleasedAt           *int64
 	LastPushedSHA          *string
 	PushTargetKind         *string

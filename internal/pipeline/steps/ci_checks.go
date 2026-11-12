@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -65,6 +66,21 @@ func hasExecutingPendingChecks(checks []scm.Check) bool {
 		}
 	}
 	return false
+}
+
+func queuedCheckNames(checks []scm.Check) []string {
+	var names []string
+	for _, c := range checks {
+		if c.Kind != scm.CheckKindRun || !c.Pending() || c.HeldForHuman() || c.ExternalReview != "" {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(c.State)) {
+		case "QUEUED", "PENDING":
+			names = append(names, c.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func hasAwaitingApprovalChecks(checks []scm.Check) bool {

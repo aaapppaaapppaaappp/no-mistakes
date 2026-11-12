@@ -230,33 +230,49 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	return updated, nil
 }
 
-func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
+func (h *Host) viewPR(ctx context.Context, pr *scm.PR) (pullRequest, error) {
 	number, err := h.validateInputPR(pr)
 	if err != nil {
-		return "", err
+		return pullRequest{}, err
 	}
 	var response struct {
 		PullRequest pullRequest `json:"pull_request"`
 	}
 	if err := h.runJSON(ctx, "pr view", []string{"--repo", h.repository, number}, &response); err != nil {
-		return "", err
+		return pullRequest{}, err
 	}
 	if _, err := h.normalizePull(response.PullRequest); err != nil {
-		return "", err
+		return pullRequest{}, err
 	}
 	if err := h.validateOutputPRNumber(number, response.PullRequest.Number); err != nil {
+		return pullRequest{}, err
+	}
+	return response.PullRequest, nil
+}
+
+func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
+	view, err := h.viewPR(ctx, pr)
+	if err != nil {
 		return "", err
 	}
 	switch {
-	case response.PullRequest.Merged:
+	case view.Merged:
 		return scm.PRStateMerged, nil
-	case response.PullRequest.State == "open":
+	case view.State == "open":
 		return scm.PRStateOpen, nil
-	case response.PullRequest.State == "closed":
+	case view.State == "closed":
 		return scm.PRStateClosed, nil
 	default:
-		return "", fmt.Errorf("forgejo-axi returned unknown PR state %q", response.PullRequest.State)
+		return "", fmt.Errorf("forgejo-axi returned unknown PR state %q", view.State)
 	}
+}
+
+func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
+	view, err := h.viewPR(ctx, pr)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(view.Base), nil
 }
 
 func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
@@ -595,7 +611,7 @@ func (h *Host) normalizePull(pull pullRequest) (*scm.PR, error) {
 	if pull.State != "open" && pull.State != "closed" {
 		return nil, fmt.Errorf("forgejo-axi returned unknown PR state %q", pull.State)
 	}
-	return &scm.PR{Number: strconv.Itoa(pull.Number), URL: pull.URL, HeadSHA: pull.HeadSHA}, nil
+	return &scm.PR{Number: strconv.Itoa(pull.Number), URL: pull.URL, HeadSHA: pull.HeadSHA, BaseBranch: pull.Base}, nil
 }
 
 func (h *Host) normalizeChecks(result checksResult) ([]scm.Check, error) {
