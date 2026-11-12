@@ -121,6 +121,35 @@ func fakePRDiscoveryHandler(args []string) {
 	if strings.Contains(joined, "--help") {
 		os.Exit(0)
 	}
+	if strings.HasPrefix(joined, "auth status") || strings.HasPrefix(joined, "extension show ") ||
+		strings.HasPrefix(joined, "devops project list ") || strings.HasPrefix(joined, "api ") && strings.HasSuffix(joined, " /user") {
+		os.Exit(0)
+	}
+	if strings.HasPrefix(joined, "status ") {
+		fmt.Println(os.Getenv("FAKE_CLI_STATUS_JSON"))
+		os.Exit(0)
+	}
+	if strings.HasPrefix(joined, "pr view ") && strings.Contains(joined, "--json state") {
+		state := os.Getenv("FAKE_CLI_PR_STATE")
+		if state == "" {
+			state = "OPEN"
+		}
+		fmt.Println(state)
+		os.Exit(0)
+	}
+	if strings.HasPrefix(joined, "pr view ") && strings.Contains(joined, "--json baseRefName") {
+		fmt.Println(os.Getenv("FAKE_CLI_PR_BASE"))
+		os.Exit(0)
+	}
+	if strings.HasPrefix(joined, "pr view ") || strings.HasPrefix(joined, "mr view ") || strings.HasPrefix(joined, "repos pr show ") {
+		payload := os.Getenv("FAKE_CLI_PR_LIST_JSON")
+		var items []json.RawMessage
+		if err := json.Unmarshal([]byte(payload), &items); err == nil && len(items) > 0 {
+			payload = string(items[0])
+		}
+		fmt.Println(payload)
+		os.Exit(0)
+	}
 	for _, flag := range []string{"--base", "--target-branch"} {
 		if _, ok := fakeCLIFlagValue(args, flag); ok {
 			fmt.Fprintln(os.Stderr, "PR discovery must not filter by base")

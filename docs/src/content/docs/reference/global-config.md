@@ -726,7 +726,7 @@ This is an idle timeout, not an absolute deadline: every time the base branch ad
 So an actively-updated green PR keeps its monitor no matter how long it stays open; under [`ci.release_after_checks_pass`](#cirelease_after_checks_pass) that watch ends at the checks verdict instead.
 If it later develops an actual merge conflict (on GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, or a provider plugin declaring `mergeable_state`), the CI auto-fix path rebases it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and publishes it through Push.
 A clean behind PR needs no command, except on GitHub when the base requires up-to-date branches (`mergeStateStatus: BEHIND`): that PR waits for a human to bring it up to date, unless [`ci.rebase_behind`](#cirebase_behind) is on.
-A check still queued for a runner does not let it elapse: every poll that sees one re-arms it, so monitoring keeps waiting until it starts.
+On GitHub, and on GitLab when its adapter reports a runner queue state, each poll that sees a queued check re-arms the idle timeout, so monitoring keeps waiting until it starts. Other forges keep the plain `ci_timeout` without queue-based rearming.
 Once every check is green, an elapsing timeout ends the merge watch as passed: the step completes with readiness recorded, the run ends as `checks_passed` exactly as under `ci.release_after_checks_pass`, and the PR is left for a human to merge, with no approval gate (a pending `no-mistakes axi handoff` keeps its own path).
 A genuinely idle/abandoned PR, one whose checks started and never finished, or one with failures, a merge conflict, or unresolved mergeability still parks at an approval gate after the timeout elapses.
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
@@ -736,7 +736,7 @@ Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or
 
 Legacy alias: `babysit_timeout`.
 
-A check counts as queued when its provider reports a pending state that has not started: GitHub `QUEUED`, `WAITING`, `REQUESTED`, `PENDING`, or `EXPECTED`, GitLab `created`, `pending`, `waiting_for_resource`, `preparing`, or `scheduled`, and Azure DevOps `queued`. A commit status that only reports `PENDING` cannot say whether it started, so it counts as queued. A running check, a check held for a person (a maintainer approval or a blocking manual job), and a required external review are never queued.
+Queue-based rearming recognizes GitHub `QUEUED`, `WAITING`, `REQUESTED`, `PENDING`, or `EXPECTED`, and GitLab `pending`, `waiting_for_resource`, `preparing`, or `scheduled` when its adapter exposes those states. On these forges, a commit status that only reports `PENDING` cannot say whether it started, so it counts as queued. GitLab `created` does not rearm the timeout because the job can be waiting behind a manual stage. A running check, a check held for a person (a maintainer approval or a blocking manual job), and a required external review do not rearm it either.
 
 ### step_quiet_warning
 

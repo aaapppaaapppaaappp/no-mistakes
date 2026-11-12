@@ -68,12 +68,6 @@ func hasExecutingPendingChecks(checks []scm.Check) bool {
 	return false
 }
 
-// queuedCheckNames names the checks that have not started: still waiting for a
-// runner, a concurrency slot, or their stage. A check held for a person is not
-// queued (no runner will pick it up), nor is a synthetic review requirement.
-// Providers that report no queued state (Bitbucket's INPROGRESS) never match,
-// and a commit status's PENDING, which cannot say whether it started, counts as
-// queued: the cap still bounds it.
 func queuedCheckNames(checks []scm.Check) []string {
 	var names []string
 	for _, c := range checks {
@@ -82,7 +76,7 @@ func queuedCheckNames(checks []scm.Check) []string {
 		}
 		switch strings.ToUpper(strings.TrimSpace(c.State)) {
 		case "QUEUED", "WAITING", "REQUESTED", "PENDING", "EXPECTED",
-			"CREATED", "WAITING_FOR_RESOURCE", "PREPARING", "SCHEDULED":
+			"WAITING_FOR_RESOURCE", "PREPARING", "SCHEDULED":
 			names = append(names, c.Name)
 		}
 	}

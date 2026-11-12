@@ -863,7 +863,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				}
 			}
 
-			if queued := queuedCheckNames(checks); len(queued) > 0 && !unlimited {
+			if queued := queuedCheckNames(checks); len(queued) > 0 && !unlimited && (provider == scm.ProviderGitHub || provider == scm.ProviderGitLab) {
 				if deadlinePassed {
 					sctx.Log(fmt.Sprintf("CI timeout re-armed: %s still queued for a runner", strings.Join(queued, ", ")))
 				}

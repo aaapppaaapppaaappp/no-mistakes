@@ -205,6 +205,7 @@ func TestQueuedCheckNamesOnlyNamesChecksThatHaveNotStarted(t *testing.T) {
 		{Name: "gh-waiting", Bucket: scm.CheckBucketPending, State: "WAITING"},
 		{Name: "gitlab-pending", Bucket: scm.CheckBucketPending, State: "PENDING"},
 		{Name: "gitlab-resource", Bucket: scm.CheckBucketPending, State: "WAITING_FOR_RESOURCE"},
+		{Name: "gitlab-created", Bucket: scm.CheckBucketPending, State: "CREATED"},
 		{Name: "running", Bucket: scm.CheckBucketPending, State: "IN_PROGRESS"},
 		{Name: "no-state", Bucket: scm.CheckBucketPending},
 		{Name: "held", Bucket: scm.CheckBucketPending, State: "QUEUED", AwaitingApproval: true},

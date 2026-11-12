@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
+	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 )
 
 const (
@@ -134,6 +135,59 @@ func TestCIStep_QueuedChecksKeepMonitoringBeyondTwoDays(t *testing.T) {
 				t.Fatalf("outcome=%+v err=%v polls=%d, want continued monitoring through 48h until cancellation", outcome, err, m.polls)
 			}
 		})
+	}
+}
+
+func TestCIStep_GitLabCreatedJobsBehindManualStageKeepTheIdleTimeout(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		state string
+		park  bool
+	}{
+		{state: "created", park: true},
+		{state: "pending"},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			t.Parallel()
+			checks := `[{"id":1,"name":"deploy","status":"manual","stage":"deploy","allow_failure":false},{"id":2,"name":"automatic","status":"` + tc.state + `","stage":"later","allow_failure":false}]`
+			m := newTimedCIMonitor(t, 10*time.Second, "[]", func(poll int) (string, time.Duration, bool) {
+				return checks, 12 * time.Second, poll == 1
+			})
+			m.sctx.Env = stepstest.FakeCIGlab(t, "opened", checks, m.sctx.Run.HeadSHA)
+			m.sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
+			prURL := "https://gitlab.com/test/repo/-/merge_requests/42"
+			m.sctx.Run.PRURL = &prURL
+			outcome, err := m.step.Execute(m.sctx)
+			if tc.park {
+				if err != nil || outcome == nil || !outcome.NeedsApproval || outcome.CIReadyNoCI != nil || m.polls != 2 {
+					t.Fatalf("outcome=%+v err=%v polls=%d, want a timeout decision for the manual-stage hold", outcome, err, m.polls)
+				}
+			} else if !errors.Is(err, context.Canceled) || outcome != nil {
+				t.Fatalf("outcome=%+v err=%v, want a reported runner queue to keep waiting", outcome, err)
+			}
+		})
+	}
+}
+
+func TestCIStep_OtherProvidersKeepThePlainIdleTimeout(t *testing.T) {
+	t.Parallel()
+	sctx, _ := pluginCIContext(t, fakeplugin.State{Checks: []fakeplugin.Check{{Name: "build", Bucket: "pending", State: "PENDING"}}})
+	current := time.Unix(1700000000, 0)
+	waits := 0
+	step := (&steps.CIStep{}).
+		SetNow(func() time.Time { return current }).
+		SetBaseBranchTip(func(context.Context) (string, bool) { return "stable-base", true }).
+		SetWaitForNextPoll(func(context.Context, time.Duration) error {
+			waits++
+			if waits > 1 {
+				return context.Canceled
+			}
+			current = current.Add(12 * time.Second)
+			return nil
+		})
+	outcome, err := step.Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval || outcome.CIReadyNoCI != nil || waits != 1 {
+		t.Fatalf("outcome=%+v err=%v waits=%d, want the ordinary timeout for a non-GitHub/GitLab provider", outcome, err, waits)
 	}
 }
 

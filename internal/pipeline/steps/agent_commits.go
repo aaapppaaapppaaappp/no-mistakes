@@ -219,10 +219,17 @@ func verifyDefaultBranchMerge(sctx *pipeline.StepContext, merge, second string) 
 	if host == nil {
 		return "", fmt.Errorf("discover PR base branch to verify the merge: %s", reason)
 	}
+	if err := host.Available(sctx.Ctx); err != nil {
+		return "", fmt.Errorf("check host before verifying the merge: %w", err)
+	}
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
 	pr, err := host.FindPR(sctx.Ctx, branch, "")
 	if err != nil {
 		return "", fmt.Errorf("discover PR base branch to verify the merge: %w", err)
+	}
+	pr, err = bindExistingPR(sctx, host, pr)
+	if err != nil {
+		return "", fmt.Errorf("bind PR before verifying the merge: %w", err)
 	}
 	if owned := runPRURL(sctx); owned != "" && !samePRIdentity(owned, pr) {
 		return "", fmt.Errorf("branch PR %q does not match recorded PR %q; cannot verify the merge", describePR(pr), owned)
