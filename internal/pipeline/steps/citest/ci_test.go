@@ -1176,7 +1176,7 @@ func TestCIStep_StableBaseStillTimesOut(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
 
-	env := stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
+	env := stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"IN_PROGRESS","bucket":"pending"}]`)
 
 	prURL := "https://github.com/test/repo/pull/42"
 	ag := &stepstest.MockAgent{AgentName: "test"}
@@ -1223,7 +1223,7 @@ func TestCIStep_UnresolvedFallbackBaseTipDoesNotRearmTimeout(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
 
-	env := stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
+	env := stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"IN_PROGRESS","bucket":"pending"}]`)
 
 	prURL := "https://github.com/test/repo/pull/42"
 	ag := &stepstest.MockAgent{AgentName: "test"}
@@ -1286,7 +1286,7 @@ func TestCIStep_ExpiredTimeoutSkipsBaseTipResolver(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
 
-	env := stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
+	env := stepstest.FakeCIGH(t, "OPEN", `[{"name":"build","state":"IN_PROGRESS","bucket":"pending"}]`)
 
 	prURL := "https://github.com/test/repo/pull/42"
 	ag := &stepstest.MockAgent{AgentName: "test"}

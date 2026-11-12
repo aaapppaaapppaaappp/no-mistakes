@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -65,6 +66,28 @@ func hasExecutingPendingChecks(checks []scm.Check) bool {
 		}
 	}
 	return false
+}
+
+// queuedCheckNames names the checks that have not started: still waiting for a
+// runner, a concurrency slot, or their stage. A check held for a person is not
+// queued (no runner will pick it up), nor is a synthetic review requirement.
+// Providers that report no queued state (Bitbucket's INPROGRESS) never match,
+// and a commit status's PENDING, which cannot say whether it started, counts as
+// queued: the cap still bounds it.
+func queuedCheckNames(checks []scm.Check) []string {
+	var names []string
+	for _, c := range checks {
+		if !c.Pending() || c.HeldForHuman() || c.ExternalReview != "" {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(c.State)) {
+		case "QUEUED", "WAITING", "REQUESTED", "PENDING", "EXPECTED",
+			"CREATED", "WAITING_FOR_RESOURCE", "PREPARING", "SCHEDULED":
+			names = append(names, c.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func hasAwaitingApprovalChecks(checks []scm.Check) bool {
@@ -471,6 +494,41 @@ func ciMergeabilityOutcome(summary, description string) *pipeline.StepOutcome {
 		NeedsApproval: true,
 		Findings:      string(findingsJSON),
 	}
+}
+
+// ciQueuedTimeoutFinding reports checks that were still queued for a runner,
+// never started, when ci_queued_timeout ran out.
+func ciQueuedTimeoutFinding(queued []string, queuedFor time.Duration) Finding {
+	return Finding{
+		ID:       "ci-checks-queued",
+		Severity: "warning",
+		Description: fmt.Sprintf(
+			"CI checks still queued for a runner after waiting %s (ci_queued_timeout): %s. "+
+				"They never started, so there is no verdict on the code yet; check the runner or concurrency limit that serves them.",
+			queuedFor.Round(time.Second), strings.Join(queued, ", ")),
+		Action: types.ActionAskUser,
+	}
+}
+
+func ciQueuedTimeoutOutcome(queued []string, queuedFor time.Duration) *pipeline.StepOutcome {
+	findings := Findings{
+		Summary: "CI checks were still queued for a runner when ci_queued_timeout ran out",
+		Items:   []Finding{ciQueuedTimeoutFinding(queued, queuedFor)},
+	}
+	findingsJSON, _ := json.Marshal(findings)
+	return &pipeline.StepOutcome{
+		NeedsApproval: true,
+		Findings:      string(findingsJSON),
+	}
+}
+
+// withAddedFinding returns outcome with item appended to its findings.
+func withAddedFinding(outcome *pipeline.StepOutcome, item Finding) *pipeline.StepOutcome {
+	findings, _ := types.ParseFindingsJSON(outcome.Findings)
+	findings.Items = append(findings.Items, item)
+	encoded, _ := json.Marshal(findings)
+	outcome.Findings = string(encoded)
+	return outcome
 }
 
 func ciMonitoringTimeoutOutcome() *pipeline.StepOutcome {

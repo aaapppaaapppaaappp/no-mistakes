@@ -1343,7 +1343,11 @@ func printFakeCommitChecks(raw string, args []string) {
 			}
 		}
 		if check.Bucket == "pending" {
-			status = "IN_PROGRESS"
+			// An explicit status (QUEUED, WAITING) models a check run that has
+			// not started; without one a pending check is running.
+			if check.Status == "" {
+				status = "IN_PROGRESS"
+			}
 			conclusion = ""
 		}
 		link := check.Link

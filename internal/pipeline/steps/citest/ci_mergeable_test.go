@@ -499,10 +499,12 @@ func TestCIStep_GitHubHeadObservationAcrossLookupFailures(t *testing.T) {
 		t.Run(fmt.Sprint(lateMovement), func(t *testing.T) {
 			t.Parallel()
 			dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
-			env := stepstest.FakeCIGH(t, "OPEN", `[{"name":"remembered-failure","state":"FAILURE","bucket":"fail"},{"name":"slow","state":"PENDING","bucket":"pending"}]`)
+			env := stepstest.FakeCIGH(t, "OPEN", `[{"name":"remembered-failure","state":"FAILURE","bucket":"fail"},{"name":"slow","state":"IN_PROGRESS","bucket":"pending"}]`)
 			heads := []string{"head-B", "head-B", "ERROR"}
 			if lateMovement {
-				heads = []string{headSHA, headSHA, headSHA, "head-B"}
+				// The trailing ERROR is the poll the monitor makes when its
+				// deadline has passed: it fails, so it observes nothing new.
+				heads = []string{headSHA, headSHA, headSHA, "head-B", "ERROR"}
 			}
 			sequence, err := json.Marshal(heads)
 			if err != nil {
@@ -552,9 +554,10 @@ func TestCIStep_GitHubHeadObservationAcrossLookupFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantLookups := "3"
+			// One lookup per poll, plus the poll at the expired deadline.
+			wantLookups := "4"
 			if lateMovement {
-				wantLookups = "4"
+				wantLookups = "5"
 			}
 			if string(data) != wantLookups {
 				t.Fatalf("head lookups = %s, want %s", data, wantLookups)

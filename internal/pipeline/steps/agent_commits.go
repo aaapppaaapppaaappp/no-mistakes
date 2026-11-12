@@ -4,16 +4,26 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// errAgentCommitsNotLinear marks agent commits that are not a plain chain of
-// single-parent commits on the recorded head, so their messages cannot be
-// rewritten without restructuring history.
+// errAgentCommitsNotLinear marks agent commits that are not a chain on the
+// recorded head the pipeline can rewrite without restructuring history: single-
+// parent commits, plus at most one merge of the default branch that
+// verifyDefaultBranchMerge accepts.
 var errAgentCommitsNotLinear = errors.New("agent commits are not a linear chain from the recorded head")
+
+// agentChainCommit is one commit on the agent's first-parent chain above the
+// recorded head. mergedTip is the second parent of the one default-branch merge
+// the chain may carry, and empty for an ordinary single-parent commit.
+type agentChainCommit struct {
+	sha       string
+	mergedTip string
+}
 
 // conformAgentCommits applies the repository's commit settings to commits a fix
 // agent made itself. When the agent runs `git commit`, the worktree is clean and
@@ -23,11 +33,14 @@ var errAgentCommitsNotLinear = errors.New("agent commits are not a linear chain 
 // The rewrite is anchored to the head the run has recorded, the same anchor
 // assertPipelineHeadContinuity and ciHeadAwaitsRecording use: every commit above
 // sctx.Run.HeadSHA is work the pipeline has not recorded yet, including commits
-// an earlier failed agent turn left behind. Only a linear, non-merge chain on
-// that head is rewritten. Trees, authors and parents are kept (only the message
-// changes) and HEAD moves with a compare-and-swap against the head observed. An
-// unexpected shape or a git failure returns an error with the agent's commits
-// untouched, so the change is never dropped and never published unshaped.
+// an earlier failed agent turn left behind. Only a linear chain on that head is
+// rewritten, with one exception: a single merge that brings the default branch
+// in (verifyDefaultBranchMerge), which a fix round needs when the base moved
+// under the PR or conflicts with it. Trees, authors and parents (both of a
+// merge's) are kept, only the message changes, and HEAD moves with a
+// compare-and-swap against the head observed. An unexpected shape or a git
+// failure returns an error with the agent's commits untouched, so the change is
+// never dropped and never published unshaped.
 func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, render func() (string, error)) error {
 	anchor := strings.TrimSpace(sctx.Run.HeadSHA)
 	if anchor == "" {
@@ -70,7 +83,8 @@ func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, re
 
 	parent, changed := anchor, false
 	published, resolvedPublished := -1, false
-	for i, sha := range chain {
+	for i, commit := range chain {
+		sha := commit.sha
 		info, err := stepGitRun(sctx, "show", "-s", "--date=raw", "--format=%T%x1f%an%x1f%ae%x1f%ad%x1f%B", sha)
 		if err != nil {
 			return fmt.Errorf("read %s agent commit %s: %w", stepName, sha, err)
@@ -98,7 +112,11 @@ func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, re
 		}
 		changed = true
 		env := []string{"GIT_AUTHOR_NAME=" + fields[1], "GIT_AUTHOR_EMAIL=" + fields[2], "GIT_AUTHOR_DATE=" + fields[3]}
-		parent, err = stepGitRunEnv(sctx, env, "commit-tree", fields[0], "-p", parent, "-m", message)
+		args := []string{"commit-tree", fields[0], "-p", parent}
+		if commit.mergedTip != "" {
+			args = append(args, "-p", commit.mergedTip)
+		}
+		parent, err = stepGitRunEnv(sctx, env, append(args, "-m", message)...)
 		if err != nil {
 			return fmt.Errorf("rewrite %s agent commit %s: %w", stepName, sha, err)
 		}
@@ -118,7 +136,7 @@ func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, re
 // records its head, so other steps skip the remote query. A query failure is
 // an error: the commits are then left untouched rather than risk rewriting
 // published history.
-func publishedChainIndex(sctx *pipeline.StepContext, stepName types.StepName, chain []string) (int, error) {
+func publishedChainIndex(sctx *pipeline.StepContext, stepName types.StepName, chain []agentChainCommit) (int, error) {
 	if stepName != types.StepCI {
 		return -1, nil
 	}
@@ -130,8 +148,8 @@ func publishedChainIndex(sctx *pipeline.StepContext, stepName types.StepName, ch
 	if err != nil {
 		return -1, fmt.Errorf("check which %s agent commits are already published: %w", stepName, err)
 	}
-	for i, sha := range chain {
-		if strings.EqualFold(sha, tip) {
+	for i, commit := range chain {
+		if strings.EqualFold(commit.sha, tip) {
 			return i, nil
 		}
 	}
@@ -149,25 +167,126 @@ func headDescendsFrom(sctx *pipeline.StepContext, anchor, head string) (bool, er
 	return err == nil, err
 }
 
-// agentCommitChain lists the commits in anchor..head oldest first and
-// requires them to be a single-parent chain that starts at anchor.
-func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]string, error) {
-	out, err := stepGitRun(sctx, "rev-list", "--reverse", "--parents", anchor+".."+head)
+// agentCommitChain lists the first-parent commits in anchor..head oldest first
+// and requires them to be a chain that starts at anchor: single-parent commits,
+// plus at most one two-parent merge that verifyDefaultBranchMerge accepts. Every
+// other shape - a second merge, an octopus, a merge of anything but the default
+// branch, or one whose first parent leaves the chain - is refused.
+func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]agentChainCommit, error) {
+	out, err := stepGitRun(sctx, "rev-list", "--first-parent", "--reverse", "--parents", anchor+".."+head)
 	if err != nil {
 		return nil, err
 	}
-	var chain []string
-	parent := anchor
+	refuse := func(reason string) error {
+		if reason != "" {
+			reason = " (" + reason + ")"
+		}
+		return fmt.Errorf("commits %s..%s: %w%s; refusing to publish agent commits that bypass the commit settings", anchor, head, errAgentCommitsNotLinear, reason)
+	}
+	var chain []agentChainCommit
+	parent, merged := anchor, false
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 2 || fields[1] != parent {
-			return nil, fmt.Errorf("commits %s..%s: %w; refusing to publish agent commits that bypass the commit settings", anchor, head, errAgentCommitsNotLinear)
+		if len(fields) < 2 || fields[1] != parent {
+			return nil, refuse("")
 		}
-		chain = append(chain, fields[0])
+		commit := agentChainCommit{sha: fields[0]}
+		switch len(fields) {
+		case 2:
+		case 3:
+			if merged {
+				return nil, refuse("more than one merge")
+			}
+			if reason, err := verifyDefaultBranchMerge(sctx, fields[0], fields[1], fields[2]); err != nil {
+				return nil, fmt.Errorf("inspect merge %s: %w", fields[0], err)
+			} else if reason != "" {
+				return nil, refuse(reason)
+			}
+			commit.mergedTip, merged = fields[2], true
+		default:
+			return nil, refuse("an octopus merge")
+		}
+		chain = append(chain, commit)
 		parent = fields[0]
 	}
 	if parent != head {
 		return nil, fmt.Errorf("commits %s..%s do not end at the observed head", anchor, head)
 	}
 	return chain, nil
+}
+
+// verifyDefaultBranchMerge decides whether merge, whose parents are first (on
+// the agent's chain) and second, only brings the PR's base branch in. It
+// returns the reason it is refused, or "" when it is accepted:
+//
+//   - second must be the base branch's remote tip, fetched now, or a commit
+//     that tip already contains (the base may advance again between the
+//     agent's fetch and this check). Anything else would publish commits no
+//     one reviewed under the cover of a merge.
+//   - every path the merge changes relative to second must be one the PR
+//     itself changes (merge-base(first, second)..first). Conflict resolution
+//     only touches such paths, so this admits the PR's own changes and the
+//     resolution and nothing else: a merge that also edits an unrelated file
+//     is an evil merge and is refused.
+//
+// A failure to fetch or read anything returns an error, never an acceptance.
+func verifyDefaultBranchMerge(sctx *pipeline.StepContext, merge, first, second string) (string, error) {
+	base := effectivePRBaseBranch(sctx)
+	tip, resolved := resolveRunDefaultBranchTip(sctx.Ctx, sctx, "", base)
+	if !resolved || tip == "" {
+		return "", fmt.Errorf("fetch the remote %s branch to verify the merge", base)
+	}
+	if second != tip {
+		contained, err := headDescendsFrom(sctx, second, tip)
+		if err != nil {
+			return "", err
+		}
+		if !contained {
+			return fmt.Sprintf("merge %s brings in %s, which is not on the remote %s branch (tip %s)", shortSHA(merge), shortSHA(second), base, shortSHA(tip)), nil
+		}
+	}
+	forkPoint, err := stepGitRun(sctx, "merge-base", first, second)
+	if err != nil {
+		return "", fmt.Errorf("find where the PR left %s: %w", base, err)
+	}
+	prPaths, err := changedPaths(sctx, forkPoint, first)
+	if err != nil {
+		return "", err
+	}
+	mergePaths, err := changedPaths(sctx, second, merge)
+	if err != nil {
+		return "", err
+	}
+	var extra []string
+	for path := range mergePaths {
+		if !prPaths[path] {
+			extra = append(extra, path)
+		}
+	}
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		const shown = 5
+		listed := strings.Join(extra[:min(len(extra), shown)], ", ")
+		if len(extra) > shown {
+			listed += fmt.Sprintf(" and %d more", len(extra)-shown)
+		}
+		return fmt.Sprintf("merge %s of %s also changes paths the PR does not: %s", shortSHA(merge), base, listed), nil
+	}
+	return "", nil
+}
+
+// changedPaths is the set of paths that differ between two commits, with rename
+// detection off so a rename counts as both of its paths.
+func changedPaths(sctx *pipeline.StepContext, from, to string) (map[string]bool, error) {
+	out, err := stepGitRunRaw(sctx, "diff", "--name-only", "--no-renames", "-z", from, to)
+	if err != nil {
+		return nil, fmt.Errorf("list paths changed in %s..%s: %w", shortSHA(from), shortSHA(to), err)
+	}
+	paths := map[string]bool{}
+	for _, path := range strings.Split(out, "\x00") {
+		if path != "" {
+			paths[path] = true
+		}
+	}
+	return paths, nil
 }

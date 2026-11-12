@@ -41,6 +41,8 @@ agent_args_override:
 
 ci_timeout: "168h"
 
+ci_queued_timeout: "24h"
+
 step_quiet_warning: "10m"
 
 agent_timeout: "30m"
@@ -725,13 +727,33 @@ This is an idle timeout, not an absolute deadline: every time the base branch ad
 So an actively-updated green PR keeps its monitor no matter how long it stays open; under [`ci.release_after_checks_pass`](#cirelease_after_checks_pass) that watch ends at the checks verdict instead.
 If it later develops an actual merge conflict (on GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, or a provider plugin declaring `mergeable_state`), the CI auto-fix path rebases it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and publishes it through Push.
 A clean behind PR needs no command, except on GitHub when the base requires up-to-date branches (`mergeStateStatus: BEHIND`): that PR waits for a human to bring it up to date, unless [`ci.rebase_behind`](#cirebase_behind) is on.
-A genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.
+A check still queued for a runner does not let it elapse: every poll that sees one re-arms it, and [`ci_queued_timeout`](#ci_queued_timeout) bounds that wait instead.
+Once every check is green, an elapsing timeout ends the merge watch as passed: the step completes with readiness recorded, the run ends as `checks_passed` exactly as under `ci.release_after_checks_pass`, and the PR is left for a human to merge, with no approval gate (a pending `no-mistakes axi handoff` keeps its own path).
+A genuinely idle/abandoned PR, one whose checks started and never finished, or one with failures, a merge conflict, or unresolved mergeability still parks at an approval gate after the timeout elapses.
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
 If the PR is merged or closed externally, the stale gate completes automatically; an open, unknown, or temporarily unreachable PR remains parked for a user decision.
 
 Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to disable this timeout. A run still ends when the PR is merged, closed, or declined, when green monitoring is explicitly handed off, or at readiness under `ci.release_after_checks_pass`. You can end it explicitly with `no-mistakes axi handoff` or cancel it with `no-mistakes axi abort --run <id>`.
 
 Legacy alias: `babysit_timeout`.
+
+### ci_queued_timeout
+
+How long the CI step keeps waiting while a check is still queued for a runner and has not started.
+
+|         |                                                 |
+| ------- | ----------------------------------------------- |
+| Type    | `string` (Go duration, or an unlimited keyword) |
+| Default | `24h`                                           |
+
+A queued check has produced no verdict on the code; it is waiting for a runner, a concurrency slot, or its pipeline stage, as when every PR shares one self-hosted runner.
+While any check of the PR head is queued, [`ci_timeout`](#ci_timeout) does not elapse: each poll that sees one re-arms it, so the check still gets the full idle window to run once it starts, and the step log names the queued checks whenever the re-arm kept the monitor alive past its deadline.
+This cap bounds the queue instead: when one unbroken stretch of polls has seen a queued check for this long, the step parks at an ask-user approval gate with one finding (`ci-checks-queued`) that names the still-queued checks and how long they waited. Known failures, a merge conflict, or unresolved mergeability seen by then are reported alongside it.
+
+The cap is never shorter than `ci_timeout`, so a queue that `ci_timeout` alone would have waited out still is.
+Set it to `unlimited` (or `none`, `off`, `never`, or a non-positive duration) to wait on a queued check until it starts. An unlimited `ci_timeout` leaves queued checks unbounded too.
+
+A check counts as queued when its provider reports a pending state that has not started: GitHub `QUEUED`, `WAITING`, `REQUESTED`, `PENDING`, or `EXPECTED`, GitLab `created`, `pending`, `waiting_for_resource`, `preparing`, or `scheduled`, and Azure DevOps `queued`. A commit status that only reports `PENDING` cannot say whether it started, so it counts as queued and the cap still bounds it. A running check, a check held for a person (a maintainer approval or a blocking manual job), and a required external review are never queued.
 
 ### step_quiet_warning
 
@@ -1368,7 +1390,7 @@ Entries are limited to 1,024 bytes and 16 placeholders, the list to 16 entries, 
 The 1,024-byte limit also applies to the rendered line, checked when configuration loads with every placeholder at its 64-byte maximum, so an entry that loads cannot overflow at commit time.
 An invalid entry fails configuration loading, and a render failure at commit time leaves the changes unstaged.
 
-Trailers are added to Review, Test, Document, and Lint fix commits, operator-authorized repository gate repairs, and CI repair commits. Commits that no single invocation produced get none rather than a guessed agent: the Push step's catch-all commit, a CI repair retried after a protected-path refusal, and rebase or merge commits that an agent writes itself.
+Trailers are added to Review, Test, Document, and Lint fix commits, operator-authorized repository gate repairs, and CI repair commits. Commits that no single invocation produced get none rather than a guessed agent: the Push step's catch-all commit, a CI repair retried after a protected-path refusal, commits an agent rebased itself, and the merge commits the Rebase step's conflict resolver writes. A fix agent's own commits in a fix round, including a merge of the PR base branch, are rewritten to the fix message and these trailers ([Pipeline Steps](/no-mistakes/reference/pipeline-steps/)).
 A per-repo [`commit.trailers`](/no-mistakes/reference/repo-config/#committrailers) list or a matching [`repository_overrides`](#repository_overrides) entry replaces this list rather than extending it; an empty list clears it.
 
 ### pr.appendix

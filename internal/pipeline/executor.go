@@ -2637,8 +2637,8 @@ func (e *Executor) completeRunWithStatus(run *db.Run, repo *db.Repo, status type
 
 // terminalRunStatus decides which success status a finished run records.
 //
-// A run whose CI step took the opt-in release path (ci.release_after_checks_pass)
-// did not merely complete: it reached its validation verdict and deliberately
+// A run whose CI step took the release path (ci.release_after_checks_pass, or a
+// green monitor whose ci_timeout elapsed) did not merely complete: it reached its validation verdict and deliberately
 // stopped observing the PR, so it records checks_passed. That keeps the outcome
 // honest - a caller can tell "checks passed, waiting on a human merge decision"
 // apart from a run that ended because the PR merged or closed - and keeps it

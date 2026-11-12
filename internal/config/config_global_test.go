@@ -651,6 +651,45 @@ func TestLoadGlobal_CITimeoutUnlimited(t *testing.T) {
 	}
 }
 
+func TestLoadGlobal_CIQueuedTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want time.Duration
+	}{
+		{"default", `{}`, DefaultCIQueuedTimeout},
+		{"explicit", `ci_queued_timeout: "36h"`, 36 * time.Hour},
+		{"unlimited", `ci_queued_timeout: "unlimited"`, CITimeoutUnlimited},
+		{"non_positive", `ci_queued_timeout: "0s"`, CITimeoutUnlimited},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadGlobal(path)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.CIQueuedTimeout != tc.want {
+				t.Fatalf("ci_queued_timeout = %v, want %v", cfg.CIQueuedTimeout, tc.want)
+			}
+			if merged := Merge(cfg, &RepoConfig{}); merged.CIQueuedTimeout != tc.want {
+				t.Fatalf("merged ci_queued_timeout = %v, want %v", merged.CIQueuedTimeout, tc.want)
+			}
+		})
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`ci_queued_timeout: "soon"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadGlobal(path); err == nil || !strings.Contains(err.Error(), "ci_queued_timeout") {
+		t.Fatalf("err = %v, want a ci_queued_timeout parse error", err)
+	}
+}
+
 func TestLoadGlobal_LegacyBabysitTimeout(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -701,6 +740,13 @@ func TestDefaultConfigYAML_MatchesGoDefaults(t *testing.T) {
 	}
 	if d != DefaultCITimeout {
 		t.Errorf("YAML ci_timeout = %v, Go default = %v", d, DefaultCITimeout)
+	}
+	d, err = time.ParseDuration(raw.CIQueuedTimeout)
+	if err != nil {
+		t.Fatalf("YAML ci_queued_timeout %q is not a valid duration: %v", raw.CIQueuedTimeout, err)
+	}
+	if d != DefaultCIQueuedTimeout {
+		t.Errorf("YAML ci_queued_timeout = %v, Go default = %v", d, DefaultCIQueuedTimeout)
 	}
 	d, err = time.ParseDuration(raw.DaemonConnectTimeout)
 	if err != nil {

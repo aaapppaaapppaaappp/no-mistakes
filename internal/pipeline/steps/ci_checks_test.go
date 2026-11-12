@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -194,5 +195,25 @@ func TestLastRepairConflictBaseCompatibility(t *testing.T) {
 				t.Fatalf("lastRepairStillUnverified() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestQueuedCheckNamesOnlyNamesChecksThatHaveNotStarted(t *testing.T) {
+	t.Parallel()
+	checks := []scm.Check{
+		{Name: "gh-queued", Bucket: scm.CheckBucketPending, State: "QUEUED"},
+		{Name: "gh-waiting", Bucket: scm.CheckBucketPending, State: "WAITING"},
+		{Name: "gitlab-pending", Bucket: scm.CheckBucketPending, State: "PENDING"},
+		{Name: "gitlab-resource", Bucket: scm.CheckBucketPending, State: "WAITING_FOR_RESOURCE"},
+		{Name: "running", Bucket: scm.CheckBucketPending, State: "IN_PROGRESS"},
+		{Name: "no-state", Bucket: scm.CheckBucketPending},
+		{Name: "held", Bucket: scm.CheckBucketPending, State: "QUEUED", AwaitingApproval: true},
+		{Name: "manual", Bucket: scm.CheckBucketPending, State: "MANUAL", AwaitingManualJob: true},
+		{Name: "review", Bucket: scm.CheckBucketPending, State: "PENDING", ExternalReview: "coderabbit"},
+		{Name: "done", Bucket: scm.CheckBucketPass, State: "QUEUED"},
+	}
+	got := strings.Join(queuedCheckNames(checks), ",")
+	if want := "gh-queued,gh-waiting,gitlab-pending,gitlab-resource"; got != want {
+		t.Fatalf("queued = %q, want %q", got, want)
 	}
 }

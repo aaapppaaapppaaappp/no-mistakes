@@ -1418,8 +1418,9 @@ func renderDriveResultForRun(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool,
 		return nil
 	}
 
-	// The opt-in release verdict: only ci.release_after_checks_pass ends the run
-	// at its checks verdict and releases the branch, so this shape reports the
+	// The release verdict: ci.release_after_checks_pass ends the run at its
+	// checks verdict, and a green monitor whose ci_timeout elapses ends it the
+	// same way, releasing the branch, so this shape reports the
 	// same outcome word with the released contract instead of the
 	// still-monitoring one.
 	if rv.Status == string(types.RunChecksPassed) {
