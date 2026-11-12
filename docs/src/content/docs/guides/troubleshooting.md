@@ -310,7 +310,7 @@ By default, the run keeps monitoring the pull request after CI readiness is esta
 How long the monitor runs is controlled by `ci_timeout` in `~/.no-mistakes/config.yaml`, an idle timeout that re-arms whenever the upstream default branch advances; the [`ci_timeout` field reference](/no-mistakes/reference/global-config/#ci_timeout) owns the default, the `unlimited` keyword and its aliases, and the exact re-arm semantics.
 Older config files may still contain an explicit `ci_timeout: "4h"` value; update it if you want the newer default behavior.
 
-On GitHub, and on GitLab when its adapter reports `QUEUED` or `PENDING`, a runner queue state keeps the monitor waiting past `ci_timeout` until the check starts. Other forges keep the plain `ci_timeout`; GitHub `WAITING` deployments and GitLab jobs still in `created` do not rearm it either, because they can require human action. If every check is green when the timeout elapses, the run ends as `checks_passed` without pausing.
+On GitHub and GitLab, an adapter-identified run queued for a runner (`QUEUED` or `PENDING`) keeps the monitor waiting past `ci_timeout` until the check starts. Generic commit statuses, status contexts, and external status checks keep the ordinary timeout even when `PENDING`. Other forges keep the plain `ci_timeout`; GitHub `WAITING` deployments and GitLab jobs still in `created` do not rearm it either, because they can require human action. If every check is green when the timeout elapses, the run ends as `checks_passed` without pausing.
 Otherwise, if the PR is still open at the timeout, the step pauses for approval with findings for the open monitoring state or any known unresolved failures.
 You can approve, fix, skip, or abort from the TUI or `no-mistakes axi respond`.
 

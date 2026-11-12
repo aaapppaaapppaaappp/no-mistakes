@@ -198,24 +198,29 @@ func TestLastRepairConflictBaseCompatibility(t *testing.T) {
 	}
 }
 
-func TestQueuedCheckNamesOnlyNamesChecksThatHaveNotStarted(t *testing.T) {
+func TestQueuedCheckNamesOnlyNamesProvenRunnerQueues(t *testing.T) {
 	t.Parallel()
 	checks := []scm.Check{
-		{Name: "gh-queued", Bucket: scm.CheckBucketPending, State: "QUEUED"},
-		{Name: "gh-waiting", Bucket: scm.CheckBucketPending, State: "WAITING"},
-		{Name: "gh-requested", Bucket: scm.CheckBucketPending, State: "REQUESTED"},
-		{Name: "gh-expected", Bucket: scm.CheckBucketPending, State: "EXPECTED"},
-		{Name: "gitlab-pending", Bucket: scm.CheckBucketPending, State: "PENDING"},
-		{Name: "gitlab-resource", Bucket: scm.CheckBucketPending, State: "WAITING_FOR_RESOURCE"},
-		{Name: "gitlab-created", Bucket: scm.CheckBucketPending, State: "CREATED"},
-		{Name: "gitlab-preparing", Bucket: scm.CheckBucketPending, State: "PREPARING"},
-		{Name: "gitlab-scheduled", Bucket: scm.CheckBucketPending, State: "SCHEDULED"},
-		{Name: "running", Bucket: scm.CheckBucketPending, State: "IN_PROGRESS"},
-		{Name: "no-state", Bucket: scm.CheckBucketPending},
-		{Name: "held", Bucket: scm.CheckBucketPending, State: "QUEUED", AwaitingApproval: true},
-		{Name: "manual", Bucket: scm.CheckBucketPending, State: "MANUAL", AwaitingManualJob: true},
-		{Name: "review", Bucket: scm.CheckBucketPending, State: "PENDING", ExternalReview: "coderabbit"},
-		{Name: "done", Bucket: scm.CheckBucketPass, State: "QUEUED"},
+		{Name: "gh-queued", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "QUEUED"},
+		{Name: "gh-waiting", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "WAITING"},
+		{Name: "gh-requested", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "REQUESTED"},
+		{Name: "gh-expected", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "EXPECTED"},
+		{Name: "gitlab-pending", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "PENDING"},
+		{Name: "gitlab-resource", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "WAITING_FOR_RESOURCE"},
+		{Name: "gitlab-created", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "CREATED"},
+		{Name: "gitlab-preparing", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "PREPARING"},
+		{Name: "gitlab-scheduled", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "SCHEDULED"},
+		{Name: "running", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "IN_PROGRESS"},
+		{Name: "no-state", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending},
+		{Name: "held", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "QUEUED", AwaitingApproval: true},
+		{Name: "manual", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "MANUAL", AwaitingManualJob: true},
+		{Name: "review", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPending, State: "PENDING", ExternalReview: "coderabbit"},
+		{Name: "done", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPass, State: "QUEUED"},
+		{Name: "gh-status", Kind: scm.CheckKindStatus, Bucket: scm.CheckBucketPending, State: "PENDING"},
+		{Name: "gitlab-external-status", Kind: scm.CheckKindStatus, Bucket: scm.CheckBucketPending, State: "PENDING"},
+		{Name: "queued-status", Kind: scm.CheckKindStatus, Bucket: scm.CheckBucketPending, State: "QUEUED"},
+		{Name: "unidentified-pending", Bucket: scm.CheckBucketPending, State: "PENDING"},
+		{Name: "unidentified-queued", Bucket: scm.CheckBucketPending, State: "QUEUED"},
 	}
 	got := strings.Join(queuedCheckNames(checks), ",")
 	if want := "gh-queued,gitlab-pending"; got != want {

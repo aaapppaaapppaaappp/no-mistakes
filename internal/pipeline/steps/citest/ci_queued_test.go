@@ -181,6 +181,52 @@ func TestCIStep_GitHubDeploymentWaitingForApprovalKeepsTheIdleTimeout(t *testing
 	}
 }
 
+func TestCIStep_ExternalStatusesRearmOnlyAlongsideRunnerQueues(t *testing.T) {
+	t.Parallel()
+	for _, provider := range []string{"github", "gitlab"} {
+		for _, jobState := range []string{"success", "queued"} {
+			t.Run(provider+"/"+jobState, func(t *testing.T) {
+				t.Parallel()
+				status, conclusion := "COMPLETED", "SUCCESS"
+				if jobState == "queued" {
+					status, conclusion = "QUEUED", ""
+				}
+				checks := `{"data":{"repository":{"object":{"statusCheckRollup":{"contexts":{"nodes":[{"__typename":"CheckRun","databaseId":1,"name":"build","status":"` + status + `","conclusion":"` + conclusion + `"},{"__typename":"StatusContext","id":"external","context":"Compliance","state":"PENDING"}],"pageInfo":{"hasNextPage":false}}}}}}}`
+				if provider == "gitlab" {
+					state := "success"
+					if jobState == "queued" {
+						state = "pending"
+					}
+					checks = `[{"id":1,"name":"build","status":"` + state + `"}]`
+				}
+				m := newTimedCIMonitor(t, 10*time.Second, checks, func(poll int) (string, time.Duration, bool) {
+					return checks, 12 * time.Second, poll == 1
+				})
+				if provider == "gitlab" {
+					m.sctx.Env = append(stepstest.FakeCIGlab(t, "opened", checks, m.sctx.Run.HeadSHA),
+						`FAKE_CLI_STATUS_CHECKS=[{"id":3,"name":"Compliance","external_url":"https://compliance.example.com/mr/42","status":"pending"}]`)
+					m.sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
+					prURL := "https://gitlab.com/test/repo/-/merge_requests/42"
+					m.sctx.Run.PRURL = &prURL
+				}
+				outcome, err := m.step.Execute(m.sctx)
+				if jobState == "queued" {
+					if !errors.Is(err, context.Canceled) || outcome != nil || m.polls != 2 {
+						t.Fatalf("outcome=%+v err=%v polls=%d, want continued monitoring for the runner queue", outcome, err, m.polls)
+					}
+					return
+				}
+				if err != nil || outcome == nil || !outcome.NeedsApproval || outcome.CIReadyNoCI != nil || m.polls != 2 {
+					t.Fatalf("outcome=%+v err=%v polls=%d, want the ordinary timeout for a pending external status", outcome, err, m.polls)
+				}
+				if !strings.Contains(outcome.Findings, "PR was still open when CI monitoring timed out") {
+					t.Fatalf("findings=%s, want the idle timeout decision", outcome.Findings)
+				}
+			})
+		}
+	}
+}
+
 func TestCIStep_OtherProvidersKeepThePlainIdleTimeout(t *testing.T) {
 	t.Parallel()
 	sctx, _ := pluginCIContext(t, fakeplugin.State{Checks: []fakeplugin.Check{{Name: "build", Bucket: "pending", State: "PENDING"}}})
