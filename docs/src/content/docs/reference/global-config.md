@@ -736,7 +736,7 @@ Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or
 
 Legacy alias: `babysit_timeout`.
 
-Queue-based rearming recognizes GitHub `QUEUED`, `WAITING`, `REQUESTED`, `PENDING`, or `EXPECTED`, and GitLab `pending`, `waiting_for_resource`, `preparing`, or `scheduled` when its adapter exposes those states. On these forges, a commit status that only reports `PENDING` cannot say whether it started, so it counts as queued. GitLab `created` does not rearm the timeout because the job can be waiting behind a manual stage. A running check, a check held for a person (a maintainer approval or a blocking manual job), and a required external review do not rearm it either.
+Queue-based rearming recognizes only `QUEUED` and `PENDING` on GitHub and GitLab when their adapters expose those states. On these forges, a commit status that only reports `PENDING` cannot say whether it started, so it counts as queued. GitHub `WAITING` does not rearm the timeout because it can require deployment approval; GitLab `created` does not rearm it because the job can be waiting behind a manual stage. Other states, running checks, checks held for a person (a maintainer approval or a blocking manual job), and required external reviews do not rearm it either.
 
 ### step_quiet_warning
 

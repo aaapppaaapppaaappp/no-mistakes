@@ -565,6 +565,14 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	return normalizePRState(mr.State), nil
 }
 
+func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
+	mr, err := h.viewMR(ctx, pr.Number)
+	if err != nil {
+		return "", err
+	}
+	return mr.toPR().BaseBranch, nil
+}
+
 func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.MergeableState, error) {
 	mr, err := h.viewMR(ctx, pr.Number)
 	if err != nil {

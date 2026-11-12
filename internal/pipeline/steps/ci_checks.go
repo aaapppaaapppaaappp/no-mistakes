@@ -75,8 +75,7 @@ func queuedCheckNames(checks []scm.Check) []string {
 			continue
 		}
 		switch strings.ToUpper(strings.TrimSpace(c.State)) {
-		case "QUEUED", "WAITING", "REQUESTED", "PENDING", "EXPECTED",
-			"WAITING_FOR_RESOURCE", "PREPARING", "SCHEDULED":
+		case "QUEUED", "PENDING":
 			names = append(names, c.Name)
 		}
 	}

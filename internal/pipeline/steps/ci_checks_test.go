@@ -203,9 +203,13 @@ func TestQueuedCheckNamesOnlyNamesChecksThatHaveNotStarted(t *testing.T) {
 	checks := []scm.Check{
 		{Name: "gh-queued", Bucket: scm.CheckBucketPending, State: "QUEUED"},
 		{Name: "gh-waiting", Bucket: scm.CheckBucketPending, State: "WAITING"},
+		{Name: "gh-requested", Bucket: scm.CheckBucketPending, State: "REQUESTED"},
+		{Name: "gh-expected", Bucket: scm.CheckBucketPending, State: "EXPECTED"},
 		{Name: "gitlab-pending", Bucket: scm.CheckBucketPending, State: "PENDING"},
 		{Name: "gitlab-resource", Bucket: scm.CheckBucketPending, State: "WAITING_FOR_RESOURCE"},
 		{Name: "gitlab-created", Bucket: scm.CheckBucketPending, State: "CREATED"},
+		{Name: "gitlab-preparing", Bucket: scm.CheckBucketPending, State: "PREPARING"},
+		{Name: "gitlab-scheduled", Bucket: scm.CheckBucketPending, State: "SCHEDULED"},
 		{Name: "running", Bucket: scm.CheckBucketPending, State: "IN_PROGRESS"},
 		{Name: "no-state", Bucket: scm.CheckBucketPending},
 		{Name: "held", Bucket: scm.CheckBucketPending, State: "QUEUED", AwaitingApproval: true},
@@ -214,7 +218,7 @@ func TestQueuedCheckNamesOnlyNamesChecksThatHaveNotStarted(t *testing.T) {
 		{Name: "done", Bucket: scm.CheckBucketPass, State: "QUEUED"},
 	}
 	got := strings.Join(queuedCheckNames(checks), ",")
-	if want := "gh-queued,gh-waiting,gitlab-pending,gitlab-resource"; got != want {
+	if want := "gh-queued,gitlab-pending"; got != want {
 		t.Fatalf("queued = %q, want %q", got, want)
 	}
 }

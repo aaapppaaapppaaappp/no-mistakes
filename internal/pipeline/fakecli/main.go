@@ -142,7 +142,24 @@ func fakePRDiscoveryHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.HasPrefix(joined, "pr view ") || strings.HasPrefix(joined, "mr view ") || strings.HasPrefix(joined, "repos pr show ") {
-		payload := os.Getenv("FAKE_CLI_PR_LIST_JSON")
+		if message := os.Getenv("FAKE_CLI_PR_DETAIL_ERR"); message != "" {
+			fmt.Fprintln(os.Stderr, message)
+			os.Exit(1)
+		}
+		if number := os.Getenv("FAKE_CLI_PR_DETAIL_NUMBER"); number != "" {
+			found := false
+			for _, arg := range args {
+				found = found || arg == number
+			}
+			if !found {
+				fmt.Fprintln(os.Stderr, "unexpected PR detail number")
+				os.Exit(1)
+			}
+		}
+		payload := os.Getenv("FAKE_CLI_PR_DETAIL_JSON")
+		if payload == "" {
+			payload = os.Getenv("FAKE_CLI_PR_LIST_JSON")
+		}
 		var items []json.RawMessage
 		if err := json.Unmarshal([]byte(payload), &items); err == nil && len(items) > 0 {
 			payload = string(items[0])

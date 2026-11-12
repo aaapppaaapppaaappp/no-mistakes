@@ -169,6 +169,18 @@ func TestCIStep_GitLabCreatedJobsBehindManualStageKeepTheIdleTimeout(t *testing.
 	}
 }
 
+func TestCIStep_GitHubDeploymentWaitingForApprovalKeepsTheIdleTimeout(t *testing.T) {
+	t.Parallel()
+	checks := `[{"name":"deployment","status":"WAITING","bucket":"pending"}]`
+	m := newTimedCIMonitor(t, 10*time.Second, checks, func(poll int) (string, time.Duration, bool) {
+		return checks, 12 * time.Second, poll == 1
+	})
+	outcome, err := m.step.Execute(m.sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval || outcome.CIReadyNoCI != nil || m.polls != 2 {
+		t.Fatalf("outcome=%+v err=%v polls=%d, want a timeout decision for the deployment approval hold", outcome, err, m.polls)
+	}
+}
+
 func TestCIStep_OtherProvidersKeepThePlainIdleTimeout(t *testing.T) {
 	t.Parallel()
 	sctx, _ := pluginCIContext(t, fakeplugin.State{Checks: []fakeplugin.Check{{Name: "build", Bucket: "pending", State: "PENDING"}}})

@@ -43,9 +43,9 @@ func TestAgentBaseMerge_UsesLiveBaseAcrossProvidersAndFixPaths(t *testing.T) {
 		{scm.ProviderBitbucket, "https://bitbucket.org/test/repo", "https://bitbucket.org/test/repo/pull-requests/42",
 			`{"values":[{"id":42,"state":"OPEN","destination":{"branch":{"name":"develop"}}}]}`},
 	} {
-		for _, persisted := range []bool{false, true} {
+		for _, discovery := range []string{"fresh", "persisted", "sibling"} {
 			for _, route := range []string{"shared", "ci", "retained"} {
-				t.Run(fmt.Sprintf("%s/persisted=%t/%s", tc.provider, persisted, route), func(t *testing.T) {
+				t.Run(fmt.Sprintf("%s/%s/%s", tc.provider, discovery, route), func(t *testing.T) {
 					sctx, dir, head := agentCommitContext(t, nil)
 					gitCmd(t, dir, "checkout", "-b", "develop", "main")
 					agentCommit(t, dir, "develop.txt", "only on develop")
@@ -57,8 +57,12 @@ func TestAgentBaseMerge_UsesLiveBaseAcrossProvidersAndFixPaths(t *testing.T) {
 					sctx.Config.CI.RevalidateRepairs = true
 					sctx.Repo.UpstreamURL = tc.remote
 					sctx.ForgeContext = &forgecontext.Context{Provider: tc.provider}
-					if persisted {
+					if discovery != "fresh" {
 						sctx.Run.PRURL = strptr(tc.url)
+					}
+					listedPayload := tc.payload
+					if discovery == "sibling" {
+						listedPayload = strings.ReplaceAll(strings.ReplaceAll(tc.payload, "42", "99"), "develop", "main")
 					}
 					if tc.provider == scm.ProviderBitbucket {
 						var listed struct {
@@ -79,7 +83,7 @@ func TestAgentBaseMerge_UsesLiveBaseAcrossProvidersAndFixPaths(t *testing.T) {
 								return
 							}
 							w.Header().Set("Content-Type", "application/json")
-							_, _ = w.Write([]byte(tc.payload))
+							_, _ = w.Write([]byte(listedPayload))
 						}))
 						t.Cleanup(server.Close)
 						sctx.Env = []string{"NO_MISTAKES_BITBUCKET_EMAIL=test@example.com", "NO_MISTAKES_BITBUCKET_API_TOKEN=test", "NO_MISTAKES_BITBUCKET_API_BASE_URL=" + server.URL}
@@ -87,7 +91,8 @@ func TestAgentBaseMerge_UsesLiveBaseAcrossProvidersAndFixPaths(t *testing.T) {
 						binDir := fakeCLIBinDir(t)
 						linkTestBinary(t, binDir, tc.provider.CLIName())
 						sctx.Env = fakeCLIEnv(binDir, map[string]string{
-							"FAKE_CLI_MODE": "pr-discovery", "FAKE_CLI_PR_LIST_JSON": tc.payload,
+							"FAKE_CLI_MODE": "pr-discovery", "FAKE_CLI_PR_LIST_JSON": listedPayload,
+							"FAKE_CLI_PR_DETAIL_JSON": tc.payload, "FAKE_CLI_PR_DETAIL_NUMBER": "42", "FAKE_CLI_PR_BASE": "develop",
 							"FORGEJO_BASE_URL": "", "FORGEJO_SSH_DOMAIN": "", "FORGEJO_TOKEN": "test",
 							"FAKE_CLI_STATUS_JSON": `{"host":{"url":"https://forge.example","api_url":"https://forge.example/api/v1"},"auth":{"configured":true,"authenticated":true,"source":"FORGEJO_TOKEN"},"capabilities":{"pull_requests":true,"probe":{"source":"swagger","complete":true}}}`,
 						})
@@ -119,46 +124,50 @@ func TestAgentBaseMerge_UsesLiveBaseAcrossProvidersAndFixPaths(t *testing.T) {
 	}
 }
 
-func TestAgentBaseMerge_PersistedPRWinsOverSibling(t *testing.T) {
+func TestAgentBaseMerge_UnreadablePersistedGitLabBaseLeavesCommitsUntouched(t *testing.T) {
 	t.Parallel()
-	for _, route := range []string{"shared", "ci", "retained"} {
-		t.Run(route, func(t *testing.T) {
-			t.Parallel()
-			sctx, dir, head := agentCommitContext(t, nil)
-			gitCmd(t, dir, "checkout", "-b", "develop", "main")
-			agentCommit(t, dir, "develop.txt", "owned PR base")
-			tip := gitCmd(t, dir, "rev-parse", "HEAD")
-			gitCmd(t, dir, "checkout", "--detach", head)
-			gitCmd(t, dir, "merge", "--no-ff", "-m", "agent merge", "develop")
-			wantTree := gitCmd(t, dir, "rev-parse", "HEAD^{tree}")
-			sctx.Config.PR.BaseBranch = "main"
-			sctx.Config.CI.RevalidateRepairs = true
-			sctx.Run.PRURL = strptr("https://github.com/test/repo/pull/42")
-			binDir := fakeCLIBinDir(t)
-			linkTestBinary(t, binDir, "gh")
-			sctx.Env = fakeCLIEnv(binDir, map[string]string{
-				"FAKE_CLI_MODE": "pr-discovery", "FAKE_CLI_PR_BASE": "develop",
-				"FAKE_CLI_PR_LIST_JSON": `[{"number":99,"url":"https://github.com/test/repo/pull/99","baseRefName":"main"}]`,
+	for _, tc := range []struct {
+		name, base, readError, want string
+	}{
+		{name: "missing base", want: "base branch is empty"},
+		{name: "unreadable detail", base: "develop", readError: "provider unavailable", want: "provider unavailable"},
+	} {
+		for _, route := range []string{"shared", "ci", "retained"} {
+			t.Run(tc.name+"/"+route, func(t *testing.T) {
+				t.Parallel()
+				sctx, dir, head := agentCommitContext(t, nil)
+				advanceMain(t, dir, "upstream.txt", "landed on main\n")
+				gitCmd(t, dir, "merge", "--no-ff", "-m", "agent merge", "main")
+				merged := gitCmd(t, dir, "rev-parse", "HEAD")
+				sctx.Config.CI.RevalidateRepairs = true
+				sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo"
+				sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitLab}
+				sctx.Run.PRURL = strptr("https://gitlab.com/test/repo/-/merge_requests/42")
+				binDir := fakeCLIBinDir(t)
+				linkTestBinary(t, binDir, "glab")
+				sctx.Env = fakeCLIEnv(binDir, map[string]string{
+					"FAKE_CLI_MODE": "pr-discovery", "FAKE_CLI_PR_DETAIL_ERR": tc.readError,
+					"FAKE_CLI_PR_DETAIL_NUMBER": "42",
+					"FAKE_CLI_PR_LIST_JSON":     `[{"iid":99,"web_url":"https://gitlab.com/test/repo/-/merge_requests/99","target_branch":"main","state":"opened"}]`,
+					"FAKE_CLI_PR_DETAIL_JSON":   `{"iid":42,"web_url":"https://gitlab.com/test/repo/-/merge_requests/42","state":"opened","target_branch":"` + tc.base + `"}`,
+				})
+				var err error
+				switch route {
+				case "shared":
+					_, err = commitAgentFixesWithResult(sctx, types.StepTest, "merge base", "fallback", nil)
+				case "ci":
+					_, err = (&CIStep{}).commitRepair(sctx, "merge base", nil)
+				case "retained":
+					_, err = (&CIStep{}).retryProtectedPathRepair(sctx)
+				}
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("err=%v, want %s", err, tc.want)
+				}
+				if gitCmd(t, dir, "rev-parse", "HEAD") != merged || sctx.Run.HeadSHA != head {
+					t.Fatal("unverified PR base changed the merge or recorded head")
+				}
 			})
-			var err error
-			switch route {
-			case "shared":
-				_, err = commitAgentFixesWithResult(sctx, types.StepTest, "merge base", "fallback", nil)
-			case "ci":
-				_, err = (&CIStep{}).commitRepair(sctx, "merge base", nil)
-			case "retained":
-				_, err = (&CIStep{}).retryProtectedPathRepair(sctx)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if parents := commitParents(t, dir, "HEAD"); len(parents) != 2 || parents[0] != head || parents[1] != tip {
-				t.Fatalf("parents=%v, want [%s %s] for the owned PR's base", parents, head, tip)
-			}
-			if gitCmd(t, dir, "rev-parse", "HEAD^{tree}") != wantTree || sctx.Run.HeadSHA != gitCmd(t, dir, "rev-parse", "HEAD") {
-				t.Fatal("owned PR merge tree or recorded head changed unexpectedly")
-			}
-		})
+		}
 	}
 }
 
