@@ -178,7 +178,7 @@ func TestCommitAgentFixes_MergeUsesExistingPRForgeBase(t *testing.T) {
 			merged := gitCmd(t, dir, "rev-parse", "HEAD")
 			sctx.Config.PR.BaseBranch = "main"
 			sctx.Run.PRURL = strptr("https://github.com/test/repo/pull/42")
-			sctx.Env = append(fakeCIGH(t, "OPEN", "[]"), "FAKE_CLI_PR_BASE=develop")
+			sctx.Env = append(fakeCIGH(t, "OPEN", "[]"), `FAKE_CLI_PR_LIST_JSON=[{"number":42,"url":"https://github.com/test/repo/pull/42","baseRefName":"develop"}]`)
 
 			_, err := commitAgentFixesWithResult(sctx, types.StepTest, "merge base", "fallback", nil)
 			if branch == "main" {
@@ -208,7 +208,7 @@ func TestCIStep_AutoFixMergeUsesExistingPRForgeBase(t *testing.T) {
 	sctx.Config.PR.BaseBranch = "main"
 	sctx.Config.CI.RevalidateRepairs = true
 	sctx.Run.PRURL = strptr("https://github.com/test/repo/pull/42")
-	sctx.Env = append(fakeCIGH(t, "OPEN", "[]"), "FAKE_CLI_PR_BASE=main")
+	sctx.Env = append(fakeCIGH(t, "OPEN", "[]"), `FAKE_CLI_PR_LIST_JSON=[{"number":42,"url":"https://github.com/test/repo/pull/42","baseRefName":"develop"}]`)
 	sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		gitCmd(t, dir, "merge", "--no-ff", "-m", "agent merge", "develop")
 		return &agent.Result{Output: []byte(`{"summary":"merge develop","code_change_needed":true}`)}, nil
@@ -275,7 +275,7 @@ func TestCIStep_CommitRepair_DefaultBranchMergeIsPublishableAndConformed(t *test
 	mainTip := advanceMain(t, dir, "upstream.txt", "landed on main\n")
 	gitCmd(t, dir, "merge", "--no-ff", "-m", "Merge branch 'main'", "main")
 
-	if _, err := (&CIStep{}).commitRepair(sctx, nil, "merge main", &agent.Result{Provider: "claude"}); err != nil {
+	if _, err := (&CIStep{}).commitRepair(sctx, "merge main", &agent.Result{Provider: "claude"}); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := fullMessage(t, dir, "HEAD"), "no-mistakes(ci): merge main"; got != want {

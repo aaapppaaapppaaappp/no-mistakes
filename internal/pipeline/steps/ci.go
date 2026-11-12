@@ -443,7 +443,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if err := clearCIMonitorReadyForIssues(sctx); err != nil {
 			return nil, err
 		}
-		repair, err := s.retryProtectedPathRepair(sctx, pr)
+		repair, err := s.retryProtectedPathRepair(sctx)
 		if err != nil {
 			return nil, err
 		}
@@ -492,20 +492,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	if timeout == 0 {
 		timeout = config.DefaultCITimeout
 	}
-	// A check still queued for a runner has not started, so the idle timeout
-	// does not run while one is: each poll that sees one re-arms it, and
-	// ci_queued_timeout bounds the queue instead. That cap is never shorter
-	// than ci_timeout, so a queue that ci_timeout alone would have outwaited
-	// still is, and an unlimited ci_timeout leaves the queue unbounded too.
-	queuedTimeout := sctx.Config.CIQueuedTimeout
-	if queuedTimeout == 0 {
-		queuedTimeout = config.DefaultCIQueuedTimeout
-	}
-	queuedUnlimited := unlimited || queuedTimeout < 0
-	if queuedTimeout < timeout {
-		queuedTimeout = timeout
-	}
-
 	releaseAfterChecksPass := ciReleaseAfterChecksPass(sctx)
 	if releaseAfterChecksPass {
 		sctx.Log(fmt.Sprintf("monitoring CI for PR #%s until every check is green...", prNumber))
@@ -544,43 +530,28 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	var timeoutFailingChecks []scm.CheckTarget
 	lastCheckHeadSHA := sctx.Run.HeadSHA
 	var timeoutExternalReviews []scm.Check
-	// queuedSince is when the current unbroken run of polls seeing a queued
-	// check began; zero while none is queued.
-	var queuedSince time.Time
 	timeoutMergeConflict := false
 	lastMonitorLog := ciMonitorStatus{}
 	consecutiveCheckErrs := 0
 	consecutiveBotCommentErrs := 0
-	// timeoutOutcome ends the monitor at its deadline. queued names the checks
-	// still queued when ci_queued_timeout ran out, and is empty when the idle
-	// timeout itself expired.
-	timeoutOutcome := func(queued []string, queuedFor time.Duration) (*pipeline.StepOutcome, error) {
+	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		if handoffPending(sctx) {
 			if err := clearCIMonitorReady(sctx); err != nil {
 				return nil, err
 			}
 		}
 		var outcome *pipeline.StepOutcome
-		if len(queued) > 0 {
-			sctx.Log(fmt.Sprintf("CI queued-check timeout reached: %s still queued after %s", strings.Join(queued, ", "), queuedFor.Round(time.Second)))
-		} else {
-			sctx.Log("CI timeout reached")
-		}
+		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
 			outcome = ciFailureOutcome(timeoutFailingChecks, timeoutMergeConflict, "CI timed out with known failures still present")
 		} else if mergeabilityBlockedReason != "" {
 			outcome = ciMergeabilityOutcome("mergeability check timed out", mergeabilityBlockedReason)
-		} else if len(queued) > 0 {
-			outcome = ciQueuedTimeoutOutcome(queued, queuedFor)
 		} else {
 			outcome = ciMonitoringTimeoutOutcome()
 		}
-		if len(queued) > 0 && (len(timeoutFailingChecks) > 0 || timeoutMergeConflict || mergeabilityBlockedReason != "") {
-			outcome = withAddedFinding(outcome, ciQueuedTimeoutFinding(queued, queuedFor))
-		}
 		if len(timeoutExternalReviews) > 0 {
 			external := ciObservationFindings(ciIssues{requiredReviews: requiredReviews(sctx), checks: timeoutExternalReviews, failing: failingCheckNames(timeoutExternalReviews)})
-			if len(timeoutFailingChecks) > 0 || timeoutMergeConflict || mergeabilityBlockedReason != "" || len(queued) > 0 {
+			if len(timeoutFailingChecks) > 0 || timeoutMergeConflict || mergeabilityBlockedReason != "" {
 				prior, _ := types.ParseFindingsJSON(outcome.Findings)
 				external.Items = append(prior.Items, external.Items...)
 				external.Summary = prior.Summary + "; " + external.Summary
@@ -892,23 +863,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				}
 			}
 
-			if queued := queuedCheckNames(checks); len(queued) == 0 {
-				queuedSince = time.Time{}
-			} else {
-				if queuedSince.IsZero() {
-					queuedSince = now()
+			if queued := queuedCheckNames(checks); len(queued) > 0 && !unlimited {
+				if deadlinePassed {
+					sctx.Log(fmt.Sprintf("CI timeout re-armed: %s still queued for a runner", strings.Join(queued, ", ")))
 				}
-				queuedFor := now().Sub(queuedSince)
-				if !queuedUnlimited && queuedFor >= queuedTimeout {
-					return timeoutOutcome(queued, queuedFor)
-				}
-				if !unlimited {
-					if deadlinePassed {
-						sctx.Log(fmt.Sprintf("CI timeout re-armed: %s still queued for a runner after %s (ci_queued_timeout: %s)", strings.Join(queued, ", "), queuedFor.Round(time.Second), queuedTimeout))
-					}
-					timeoutAnchor = now()
-					deadlinePassed = false
-				}
+				timeoutAnchor = now()
+				deadlinePassed = false
 			}
 
 			if hasIssues || len(awaitingRerun) > 0 {
@@ -1127,7 +1087,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			behindBaseTip = ""
 		}
 		if deadlinePassed {
-			return timeoutOutcome(nil, 0)
+			return timeoutOutcome()
 		}
 		woken, err := waitForPoll()
 		if err != nil {

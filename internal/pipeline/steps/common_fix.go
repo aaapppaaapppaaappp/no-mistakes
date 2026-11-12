@@ -487,7 +487,7 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	render := func() (string, error) {
 		return renderFixCommitMessage(sctx, stepName, summary, fallbackSummary, producer)
 	}
-	if err := conformAgentCommits(sctx, stepName, "", render); err != nil {
+	if err := conformAgentCommits(sctx, stepName, render); err != nil {
 		return false, err
 	}
 	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")

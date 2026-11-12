@@ -226,8 +226,9 @@ func (h *Host) toPR(pr *PullRequest) *scm.PR {
 		return nil
 	}
 	return &scm.PR{
-		Number: strconv.Itoa(pr.ID),
-		URL:    prURL(h.repo, pr.ID, pr.URL),
+		Number:     strconv.Itoa(pr.ID),
+		URL:        prURL(h.repo, pr.ID, pr.URL),
+		BaseBranch: pr.BaseBranch,
 	}
 }
 

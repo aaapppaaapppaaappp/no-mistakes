@@ -2,6 +2,7 @@ package citest
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,7 +11,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
@@ -29,7 +29,7 @@ type timedCIMonitor struct {
 	polls int
 }
 
-func newTimedCIMonitor(t *testing.T, ciTimeout, queuedTimeout time.Duration, first string, next func(poll int) (checks string, advance time.Duration, ok bool)) *timedCIMonitor {
+func newTimedCIMonitor(t *testing.T, ciTimeout time.Duration, first string, next func(poll int) (checks string, advance time.Duration, ok bool)) *timedCIMonitor {
 	t.Helper()
 	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
 	m := &timedCIMonitor{polls: 1}
@@ -38,7 +38,6 @@ func newTimedCIMonitor(t *testing.T, ciTimeout, queuedTimeout time.Duration, fir
 	prURL := "https://github.com/test/repo/pull/42"
 	m.sctx.Run.PRURL = &prURL
 	m.sctx.Config.CITimeout = ciTimeout
-	m.sctx.Config.CIQueuedTimeout = queuedTimeout
 	m.sctx.Log = func(s string) { m.logs = append(m.logs, s) }
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -79,7 +78,7 @@ func TestCIStep_QueuedCheckRearmsTheTimeoutUntilItStartsAndFinishes(t *testing.T
 	t.Parallel()
 	// Queued well past ci_timeout, then running within the re-armed window,
 	// then green until the merge watch expires.
-	m := newTimedCIMonitor(t, 10*time.Second, 0, queuedSuite, func(poll int) (string, time.Duration, bool) {
+	m := newTimedCIMonitor(t, 10*time.Second, queuedSuite, func(poll int) (string, time.Duration, bool) {
 		switch {
 		case poll < 5:
 			return queuedSuite, 12 * time.Second, true
@@ -109,145 +108,30 @@ func TestCIStep_QueuedCheckRearmsTheTimeoutUntilItStartsAndFinishes(t *testing.T
 	}
 }
 
-func TestCIStep_QueuedCheckCapNamesTheChecksAndTheWait(t *testing.T) {
+func TestCIStep_QueuedChecksKeepMonitoringBeyondTwoDays(t *testing.T) {
 	t.Parallel()
-	m := newTimedCIMonitor(t, 10*time.Second, 2*time.Minute, queuedSuite, func(int) (string, time.Duration, bool) {
-		return queuedSuite, 30 * time.Second, true
-	})
-
-	outcome, err := m.step.Execute(m.sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome == nil || !outcome.NeedsApproval {
-		t.Fatalf("outcome = %+v, want the queued-check cap to park", outcome)
-	}
-	findings, err := types.ParseFindingsJSON(outcome.Findings)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(findings.Items) != 1 {
-		t.Fatalf("findings = %s, want exactly the queued-check finding", outcome.Findings)
-	}
-	got := findings.Items[0]
-	if got.ID != "ci-checks-queued" || got.ActionOrDefault() != types.ActionAskUser ||
-		!strings.Contains(got.Description, "odoo-suites") || !strings.Contains(got.Description, "after waiting 2m0s") {
-		t.Fatalf("finding = %+v, want an ask-user finding naming odoo-suites and its 2m0s wait", got)
-	}
-	if strings.Contains(outcome.Findings, "PR was still open when CI monitoring timed out") {
-		t.Fatalf("findings = %s, want the queued-check finding instead of the generic timeout", outcome.Findings)
-	}
-	if m.polls != 5 {
-		t.Fatalf("polls = %d, want the cap reached at the fifth poll (2m after the queue was first seen)", m.polls)
-	}
-}
-
-func TestCIStep_QueuedCheckCapIsNeverShorterThanCITimeout(t *testing.T) {
-	t.Parallel()
-	m := newTimedCIMonitor(t, 50*time.Second, 5*time.Second, queuedSuite, func(int) (string, time.Duration, bool) {
-		return queuedSuite, 20 * time.Second, true
-	})
-
-	outcome, err := m.step.Execute(m.sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome == nil || !strings.Contains(outcome.Findings, "ci-checks-queued") {
-		t.Fatalf("outcome = %+v, want the queued-check cap", outcome)
-	}
-	if m.polls != 4 {
-		t.Fatalf("polls = %d, want the cap at ci_timeout (60s >= 50s), not at the shorter 5s cap", m.polls)
-	}
-}
-
-func TestCIStep_QueuedCheckCapReportsCurrentPollFailures(t *testing.T) {
-	t.Parallel()
-	const queuedBuildFailure = `[{"name":"odoo-suites","status":"QUEUED","bucket":"pending"},{"name":"build","state":"FAILURE","bucket":"fail"}]`
-	const queuedTestFailure = `[{"name":"odoo-suites","status":"QUEUED","bucket":"pending"},{"name":"test","state":"FAILURE","bucket":"fail"}]`
 	for _, tc := range []struct {
-		name, first, last string
-		failures          []string
+		name, checks string
+		review       bool
 	}{
-		{name: "new failure at the cap", first: queuedSuite, last: queuedBuildFailure, failures: []string{"build"}},
-		{name: "previous failure clears at the cap", first: queuedBuildFailure, last: queuedSuite},
-		{name: "failure changes at the cap", first: queuedBuildFailure, last: queuedTestFailure, failures: []string{"test"}},
+		{name: "queued", checks: queuedSuite},
+		{name: "queued with a failure", checks: `[{"name":"odoo-suites","status":"QUEUED","bucket":"pending"},{"name":"build","state":"FAILURE","bucket":"fail"}]`},
+		{name: "queued with an external review", checks: queuedSuite, review: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			m := newTimedCIMonitor(t, 10*time.Second, 30*time.Second, tc.first, func(poll int) (string, time.Duration, bool) {
-				return tc.last, 30 * time.Second, poll == 1
+			m := newTimedCIMonitor(t, 4*time.Hour, tc.checks, func(poll int) (string, time.Duration, bool) {
+				return tc.checks, 8 * time.Hour, poll < 7
 			})
+			if tc.review {
+				m.sctx.Config.CI.RequiredReviews = []string{"coderabbit"}
+				m.sctx.Env = append(m.sctx.Env,
+					"FAKE_CLI_PR_HEAD_SHA="+m.sctx.Run.HeadSHA,
+					"FAKE_CLI_EXTERNAL_REVIEWS="+externalReviewPayload(m.sctx.Run.HeadSHA, "in_progress", "", ""))
+			}
 			outcome, err := m.step.Execute(m.sctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if outcome == nil || !outcome.NeedsApproval || outcome.AutoFixable {
-				t.Fatalf("outcome = %+v, want the queue cap to park for a decision", outcome)
-			}
-			findings, err := types.ParseFindingsJSON(outcome.Findings)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(findings.Items) != len(tc.failures)+1 {
-				t.Fatalf("findings = %+v, want the queue and current failures %v", findings.Items, tc.failures)
-			}
-			queued := false
-			var failures []string
-			for _, item := range findings.Items {
-				if item.ID == "ci-checks-queued" {
-					queued = item.ActionOrDefault() == types.ActionAskUser
-				} else if item.Category == types.FindingCategoryCICheck {
-					failures = append(failures, item.Check)
-				}
-			}
-			if !queued || strings.Join(failures, ",") != strings.Join(tc.failures, ",") {
-				t.Fatalf("findings = %+v, want queue and current failures %v", findings.Items, tc.failures)
-			}
-		})
-	}
-}
-
-func TestCIStep_QueuedCheckCapPreservesPendingExternalReview(t *testing.T) {
-	t.Parallel()
-	for _, withFailure := range []bool{false, true} {
-		name, capChecks := "queue and review", queuedSuite
-		wantCount := 2
-		if withFailure {
-			name = "queue, failure and review"
-			capChecks = `[{"name":"odoo-suites","status":"QUEUED","bucket":"pending"},{"name":"build","state":"FAILURE","bucket":"fail"}]`
-			wantCount = 3
-		}
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			m := newTimedCIMonitor(t, 10*time.Second, 30*time.Second, queuedSuite, func(poll int) (string, time.Duration, bool) {
-				return capChecks, 30 * time.Second, poll == 1
-			})
-			m.sctx.Config.CI.RequiredReviews = []string{"coderabbit"}
-			m.sctx.Env = append(m.sctx.Env,
-				"FAKE_CLI_PR_HEAD_SHA="+m.sctx.Run.HeadSHA,
-				"FAKE_CLI_EXTERNAL_REVIEWS="+externalReviewPayload(m.sctx.Run.HeadSHA, "in_progress", "", ""))
-			outcome, err := m.step.Execute(m.sctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if outcome == nil || !outcome.NeedsApproval || outcome.AutoFixable {
-				t.Fatalf("outcome = %+v, want an ask-user timeout", outcome)
-			}
-			findings, err := types.ParseFindingsJSON(outcome.Findings)
-			if err != nil {
-				t.Fatal(err)
-			}
-			queued, review, failure := false, false, false
-			for _, item := range findings.Items {
-				if item.ActionOrDefault() != types.ActionAskUser {
-					t.Fatalf("finding = %+v, want ask-user", item)
-				}
-				queued = queued || item.ID == "ci-checks-queued"
-				review = review || item.Category == types.FindingCategoryCIReviewBot
-				failure = failure || item.Category == types.FindingCategoryCICheck && item.Check == "build"
-			}
-			if len(findings.Items) != wantCount || !queued || !review || failure != withFailure {
-				t.Fatalf("findings = %+v, want queue, review, and failure=%t", findings.Items, withFailure)
+			if !errors.Is(err, context.Canceled) || outcome != nil || m.polls != 7 {
+				t.Fatalf("outcome=%+v err=%v polls=%d, want continued monitoring through 48h until cancellation", outcome, err, m.polls)
 			}
 		})
 	}
@@ -255,7 +139,7 @@ func TestCIStep_QueuedCheckCapPreservesPendingExternalReview(t *testing.T) {
 
 func TestCIStep_GreenChecksAtTheDeadlineEndAsChecksPassed(t *testing.T) {
 	t.Parallel()
-	m := newTimedCIMonitor(t, 10*time.Second, 0, greenSuite, func(poll int) (string, time.Duration, bool) {
+	m := newTimedCIMonitor(t, 10*time.Second, greenSuite, func(poll int) (string, time.Duration, bool) {
 		if poll > 1 {
 			return "", 0, false
 		}
@@ -279,7 +163,7 @@ func TestCIStep_GreenChecksAtTheDeadlineEndAsChecksPassed(t *testing.T) {
 
 func TestCIStep_GreenChecksAtTheDeadlineWithAPendingHandoffKeepTheTimeoutPath(t *testing.T) {
 	t.Parallel()
-	m := newTimedCIMonitor(t, 10*time.Second, 0, greenSuite, func(poll int) (string, time.Duration, bool) {
+	m := newTimedCIMonitor(t, 10*time.Second, greenSuite, func(poll int) (string, time.Duration, bool) {
 		if poll > 1 {
 			return "", 0, false
 		}
@@ -298,7 +182,7 @@ func TestCIStep_GreenChecksAtTheDeadlineWithAPendingHandoffKeepTheTimeoutPath(t 
 
 func TestCIStep_RunningCheckPastTheDeadlineStillTimesOut(t *testing.T) {
 	t.Parallel()
-	m := newTimedCIMonitor(t, 10*time.Second, 0, runningSuite, func(poll int) (string, time.Duration, bool) {
+	m := newTimedCIMonitor(t, 10*time.Second, runningSuite, func(poll int) (string, time.Duration, bool) {
 		if poll > 1 {
 			return "", 0, false
 		}

@@ -32,6 +32,7 @@ func agentCommitContext(t *testing.T, trailers []string) (*pipeline.StepContext,
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "claude"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.Commit = config.Commit{Trailers: trailers}
+	sctx.Env = fakeCIGH(t, "OPEN", "[]")
 	return sctx, dir, headSHA
 }
 
@@ -263,7 +264,7 @@ func TestCIStep_CommitRepair_AgentOwnCommitFollowsCommitSettings(t *testing.T) {
 	sctx.Config.CI.RevalidateRepairs = true
 	agentCommit(t, dir, "agent.txt", "fix(tests): drop apostrophes from the heredocs")
 
-	if _, err := (&CIStep{}).commitRepair(sctx, nil, "repair CI", &agent.Result{Provider: "claude"}); err != nil {
+	if _, err := (&CIStep{}).commitRepair(sctx, "repair CI", &agent.Result{Provider: "claude"}); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := fullMessage(t, dir, "HEAD"), "no-mistakes(ci): repair CI"; got != want {
@@ -282,7 +283,7 @@ func TestCIStep_CommitRepair_RetainedAgentCommitFromAFailedTurnFollowsCommitSett
 	// retry has no producer and changes nothing itself.
 	agentCommit(t, dir, "agent.txt", "fix(tests): left behind by a failed turn")
 
-	if _, err := (&CIStep{}).commitRepair(sctx, nil, "", nil); err != nil {
+	if _, err := (&CIStep{}).commitRepair(sctx, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := fullMessage(t, dir, "HEAD"), "no-mistakes(ci): repair failing checks"; got != want {
@@ -309,7 +310,7 @@ func TestCIStep_CommitRepair_MergeFromAnOrdinaryRepairIsRefused(t *testing.T) {
 	agentMergeCommit(t, dir, sctx.Run.HeadSHA)
 	merged := gitCmd(t, dir, "rev-parse", "HEAD")
 
-	_, err := (&CIStep{}).commitRepair(sctx, nil, "repair", nil)
+	_, err := (&CIStep{}).commitRepair(sctx, "repair", nil)
 	if err == nil || !strings.Contains(err.Error(), "not a linear chain") {
 		t.Fatalf("err = %v, want a refusal of the non-linear chain", err)
 	}
@@ -328,7 +329,7 @@ func TestCIStep_CommitRepair_RebasedHistoryKeepsItsCommitsAndRevalidates(t *test
 	agentCommit(t, dir, "rebased.txt", "rebased subject")
 	rebased := gitCmd(t, dir, "rev-parse", "HEAD")
 
-	repair, err := (&CIStep{}).commitRepair(sctx, nil, "repair", nil)
+	repair, err := (&CIStep{}).commitRepair(sctx, "repair", nil)
 	if err != nil {
 		t.Fatalf("a rebasing repair must not be refused: %v", err)
 	}
@@ -354,7 +355,7 @@ func TestCIStep_CommitRepair_AlreadyPublishedAgentCommitIsNotRewritten(t *testin
 	gitCmd(t, dir, "remote", "set-url", "origin", remote)
 	agentCommit(t, dir, "local.txt", "fix(tests): not published yet")
 
-	if _, err := (&CIStep{}).commitRepair(sctx, nil, "retry summary", nil); err != nil {
+	if _, err := (&CIStep{}).commitRepair(sctx, "retry summary", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD~1"); got != published {
@@ -402,7 +403,7 @@ func TestCIStep_CommitRepair_StalledRemoteReadFailsClosedWithinItsDeadline(t *te
 	// The run context carries no deadline, so only the read's own bound can end it.
 	done := make(chan error, 1)
 	go func() {
-		_, err := (&CIStep{}).commitRepair(sctx, nil, "repair", nil)
+		_, err := (&CIStep{}).commitRepair(sctx, "repair", nil)
 		done <- err
 	}()
 	var err error
@@ -433,7 +434,7 @@ func TestCIStep_CommitRepair_UnfinishedMergeAfterAnAgentCommitIsRefused(t *testi
 	// The agent stops after `git merge --no-commit`, leaving MERGE_HEAD behind.
 	gitCmd(t, dir, "merge", "--no-ff", "--no-commit", side)
 
-	_, err := (&CIStep{}).commitRepair(sctx, nil, "repair", nil)
+	_, err := (&CIStep{}).commitRepair(sctx, "repair", nil)
 	if err == nil || !strings.Contains(err.Error(), "not a linear chain") {
 		t.Fatalf("err = %v, want a refusal of the unfinished merge", err)
 	}

@@ -496,41 +496,6 @@ func ciMergeabilityOutcome(summary, description string) *pipeline.StepOutcome {
 	}
 }
 
-// ciQueuedTimeoutFinding reports checks that were still queued for a runner,
-// never started, when ci_queued_timeout ran out.
-func ciQueuedTimeoutFinding(queued []string, queuedFor time.Duration) Finding {
-	return Finding{
-		ID:       "ci-checks-queued",
-		Severity: "warning",
-		Description: fmt.Sprintf(
-			"CI checks still queued for a runner after waiting %s (ci_queued_timeout): %s. "+
-				"They never started, so there is no verdict on the code yet; check the runner or concurrency limit that serves them.",
-			queuedFor.Round(time.Second), strings.Join(queued, ", ")),
-		Action: types.ActionAskUser,
-	}
-}
-
-func ciQueuedTimeoutOutcome(queued []string, queuedFor time.Duration) *pipeline.StepOutcome {
-	findings := Findings{
-		Summary: "CI checks were still queued for a runner when ci_queued_timeout ran out",
-		Items:   []Finding{ciQueuedTimeoutFinding(queued, queuedFor)},
-	}
-	findingsJSON, _ := json.Marshal(findings)
-	return &pipeline.StepOutcome{
-		NeedsApproval: true,
-		Findings:      string(findingsJSON),
-	}
-}
-
-// withAddedFinding returns outcome with item appended to its findings.
-func withAddedFinding(outcome *pipeline.StepOutcome, item Finding) *pipeline.StepOutcome {
-	findings, _ := types.ParseFindingsJSON(outcome.Findings)
-	findings.Items = append(findings.Items, item)
-	encoded, _ := json.Marshal(findings)
-	outcome.Findings = string(encoded)
-	return outcome
-}
-
 func ciMonitoringTimeoutOutcome() *pipeline.StepOutcome {
 	findings := Findings{
 		Summary: "CI monitoring timed out before PR was merged or closed",

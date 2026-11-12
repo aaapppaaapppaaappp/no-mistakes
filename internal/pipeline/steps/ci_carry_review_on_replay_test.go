@@ -64,7 +64,7 @@ func writeFile(t *testing.T, dir, name, content string) {
 // with the resolved rebase target bound for the proof.
 func (f *replayFixture) record(t *testing.T) ciRepairResult {
 	t.Helper()
-	repair, err := (&CIStep{replayBase: f.base}).commitRepair(f.sctx, nil, "rebase onto the base", nil)
+	repair, err := (&CIStep{replayBase: f.base}).commitRepair(f.sctx, "rebase onto the base", nil)
 	if err != nil {
 		t.Fatalf("recording the rebase repair failed: %v\nlog:\n%s", err, f.log())
 	}
@@ -442,7 +442,7 @@ func TestCIStep_CarryReviewOnReplay_ALaterNoChangeFixStillRestartsAtTest(t *test
 		t.Fatal("the carry did not record its pending Test restart")
 	}
 
-	repair, err := (&CIStep{}).commitRepair(f.sctx, nil, "", nil)
+	repair, err := (&CIStep{}).commitRepair(f.sctx, "", nil)
 	if err != nil {
 		t.Fatalf("no-change fix round: %v\nlog:\n%s", err, f.log())
 	}
@@ -477,7 +477,7 @@ func TestCIStep_CarryReviewOnReplay_ACommitOnTopOfAPendingCarryRevalidatesFromRe
 	f.carry(t)
 	writeCIFix(f.dir)
 
-	repair, err := (&CIStep{}).commitRepair(f.sctx, nil, "repair the failing check", nil)
+	repair, err := (&CIStep{}).commitRepair(f.sctx, "repair the failing check", nil)
 	if err != nil {
 		t.Fatalf("fix round: %v\nlog:\n%s", err, f.log())
 	}

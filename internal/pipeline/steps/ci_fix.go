@@ -348,7 +348,7 @@ CI logs:
 		s.replayBase = rebaseBaseSHA
 		defer func() { s.replayBase = "" }()
 	}
-	repair, err := s.commitRepair(sctx, pr, conclusion.Summary, result)
+	repair, err := s.commitRepair(sctx, conclusion.Summary, result)
 	if mergeConflict && rebaseBaseResolved {
 		repair.ConflictBaseSHA = rebaseBaseSHA
 	}
@@ -667,10 +667,10 @@ func (r ciRepairResult) restartFrom() types.StepName {
 
 // commitAndPush remains as the narrow test seam for the default summary.
 func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (ciRepairResult, error) {
-	return s.commitRepair(sctx, nil, "", nil)
+	return s.commitRepair(sctx, "", nil)
 }
 
-func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext, pr *scm.PR) (ciRepairResult, error) {
+func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairResult, error) {
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return ciRepairResult{}, err
 	}
@@ -678,7 +678,7 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext, pr *scm.PR
 	sctx.Log("retrying retained CI repair after protected-path refusal")
 	// The retained changes outlived the invocation that made them, so no
 	// producer is known here and the commit carries no trailers.
-	repair, err := s.commitRepair(sctx, pr, "", nil)
+	repair, err := s.commitRepair(sctx, "", nil)
 	if err != nil || repair.HeadAdvanced {
 		return repair, err
 	}
@@ -689,7 +689,7 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext, pr *scm.PR
 	return s.recordRepair(sctx, head)
 }
 
-func (s *CIStep) commitRepair(sctx *pipeline.StepContext, pr *scm.PR, summary string, producer *agent.Result) (ciRepairResult, error) {
+func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, producer *agent.Result) (ciRepairResult, error) {
 	render := func() (string, error) {
 		repairSummary := summary
 		if repairSummary == "" {
@@ -705,11 +705,7 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, pr *scm.PR, summary st
 		}
 		return message, nil
 	}
-	baseBranch := ""
-	if pr != nil {
-		baseBranch = strings.TrimSpace(pr.BaseBranch)
-	}
-	if err := conformAgentCommits(sctx, types.StepCI, baseBranch, render); err != nil {
+	if err := conformAgentCommits(sctx, types.StepCI, render); err != nil {
 		return ciRepairResult{}, err
 	}
 	status, err := stepGitRun(sctx, "status", "--porcelain")

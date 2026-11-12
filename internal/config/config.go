@@ -38,11 +38,6 @@ import (
 const (
 	// DefaultCITimeout is the monitor's idle timeout when ci_timeout is unset.
 	DefaultCITimeout = 7 * 24 * time.Hour
-	// DefaultCIQueuedTimeout bounds how long the CI monitor keeps waiting past
-	// ci_timeout while a check is still queued for a runner, when
-	// ci_queued_timeout is unset. A queue on a single shared self-hosted runner
-	// can legitimately outlast an idle timeout of a few hours.
-	DefaultCIQueuedTimeout = 24 * time.Hour
 	// DefaultStepQuietWarning is how long a running/fixing step can go without
 	// a new log or lifecycle activity before AXI status marks it quiet.
 	DefaultStepQuietWarning = 10 * time.Minute
@@ -234,7 +229,6 @@ type GlobalConfig struct {
 	// pushed branch may set it.
 	Worktree          Worktree      `yaml:"-"`
 	CITimeout         time.Duration `yaml:"-"`
-	CIQueuedTimeout   time.Duration `yaml:"-"`
 	StepQuietWarning  time.Duration `yaml:"-"`
 	AgentTimeout      time.Duration `yaml:"-"`
 	AgentCrashRetries int           `yaml:"-"`
@@ -316,7 +310,6 @@ type globalConfigRaw struct {
 	ReviewFixerAgent          types.AgentName            `yaml:"review_fixer_agent"`
 	ReviewFixerCommand        []string                   `yaml:"review_fixer_command"`
 	CITimeout                 string                     `yaml:"ci_timeout"`
-	CIQueuedTimeout           string                     `yaml:"ci_queued_timeout"`
 	DaemonConnectTimeout      string                     `yaml:"daemon_connect_timeout"`
 	BranchSyncRemoteTimeout   string                     `yaml:"branch_sync_remote_timeout"`
 	GateReconcileInterval     string                     `yaml:"gate_reconcile_interval"`
@@ -994,7 +987,6 @@ type Config struct {
 	ReviewFixerCommand        []string
 	ReviewAgents              map[string]ReviewAgent
 	CITimeout                 time.Duration
-	CIQueuedTimeout           time.Duration
 	StepQuietWarning          time.Duration
 	AgentTimeout              time.Duration
 	AgentCrashRetries         int
@@ -1653,14 +1645,6 @@ forgejo_axi_path: forgejo-axi
 # no-mistakes axi handoff ends it explicitly for human review.
 # See docs/src/content/docs/reference/global-config.md#ci_timeout.
 ci_timeout: "168h"
-
-# How long the CI monitor keeps waiting past ci_timeout while a check is still
-# queued for a runner (not started yet). While a check is queued the idle
-# timeout does not expire; once this cap is reached the step parks with a
-# finding naming the queued checks. Never shorter than ci_timeout. Accepts the
-# same "unlimited" keywords as ci_timeout.
-# See docs/src/content/docs/reference/global-config.md#ci_queued_timeout.
-ci_queued_timeout: "24h"
 
 # AXI status marks a running/fixing step as quiet when no step log or native
 # agent lifecycle activity has appeared for this long. This is observability
@@ -2682,7 +2666,6 @@ func DefaultGlobalConfig() *GlobalConfig {
 		Agents:                  []types.AgentName{types.AgentAuto},
 		ForgejoAXIPath:          "forgejo-axi",
 		CITimeout:               DefaultCITimeout,
-		CIQueuedTimeout:         DefaultCIQueuedTimeout,
 		StepQuietWarning:        DefaultStepQuietWarning,
 		AgentTimeout:            DefaultAgentTimeout,
 		ReviewAgentTimeout:      DefaultReviewAgentTimeout,
@@ -2973,13 +2956,6 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.CITimeout = d
 	}
-	if raw.CIQueuedTimeout != "" {
-		d, err := parseCIDuration("ci_queued_timeout", raw.CIQueuedTimeout)
-		if err != nil {
-			return nil, err
-		}
-		cfg.CIQueuedTimeout = d
-	}
 	if raw.StepQuietWarning != "" {
 		d, err := time.ParseDuration(raw.StepQuietWarning)
 		if err != nil {
@@ -3233,19 +3209,13 @@ func normalizeForgeProfilePath(value string) (string, error) {
 // resolves to CITimeoutUnlimited so the monitor never self-terminates;
 // otherwise the value is parsed as a Go duration.
 func parseCITimeout(value string) (time.Duration, error) {
-	return parseCIDuration("ci_timeout", value)
-}
-
-// parseCIDuration parses a CI monitor duration named name with ci_timeout's
-// keyword and non-positive "unlimited" semantics.
-func parseCIDuration(name, value string) (time.Duration, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "unlimited", "none", "off", "never":
 		return CITimeoutUnlimited, nil
 	}
 	d, err := time.ParseDuration(value)
 	if err != nil {
-		return 0, fmt.Errorf("parse %s %q: %w", name, value, err)
+		return 0, fmt.Errorf("parse ci_timeout %q: %w", value, err)
 	}
 	if d <= 0 {
 		return CITimeoutUnlimited, nil
@@ -4363,7 +4333,6 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		ReviewFixerCommand:        append([]string(nil), global.ReviewFixerCommand...),
 		ReviewAgents:              global.ReviewAgents,
 		CITimeout:                 global.CITimeout,
-		CIQueuedTimeout:           global.CIQueuedTimeout,
 		StepQuietWarning:          global.StepQuietWarning,
 		AgentTimeout:              global.AgentTimeout,
 		AgentCrashRetries:         global.AgentCrashRetries,

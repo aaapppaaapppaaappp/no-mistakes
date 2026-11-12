@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
-	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -41,7 +40,7 @@ type agentChainCommit struct {
 // compare-and-swap against the head observed. An unexpected shape or a git
 // failure returns an error with the agent's commits untouched, so the change is
 // never dropped and never published unshaped.
-func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, baseBranch string, render func() (string, error)) error {
+func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, render func() (string, error)) error {
 	anchor := strings.TrimSpace(sctx.Run.HeadSHA)
 	if anchor == "" {
 		return nil
@@ -72,7 +71,7 @@ func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, ba
 		// is not the agent adding commits; continuity checks own that case.
 		return nil
 	}
-	chain, err := agentCommitChain(sctx, anchor, head, baseBranch)
+	chain, err := agentCommitChain(sctx, anchor, head)
 	if err != nil {
 		return fmt.Errorf("inspect %s agent commits: %w", stepName, err)
 	}
@@ -172,7 +171,7 @@ func headDescendsFrom(sctx *pipeline.StepContext, anchor, head string) (bool, er
 // plus at most one two-parent merge that verifyDefaultBranchMerge accepts. Every
 // other shape - a second merge, an octopus, a merge of anything but the default
 // branch, or one whose first parent leaves the chain - is refused.
-func agentCommitChain(sctx *pipeline.StepContext, anchor, head, baseBranch string) ([]agentChainCommit, error) {
+func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]agentChainCommit, error) {
 	out, err := stepGitRun(sctx, "rev-list", "--first-parent", "--reverse", "--parents", anchor+".."+head)
 	if err != nil {
 		return nil, err
@@ -197,7 +196,7 @@ func agentCommitChain(sctx *pipeline.StepContext, anchor, head, baseBranch strin
 			if merged {
 				return nil, refuse("more than one merge")
 			}
-			if reason, err := verifyDefaultBranchMerge(sctx, fields[0], fields[2], baseBranch); err != nil {
+			if reason, err := verifyDefaultBranchMerge(sctx, fields[0], fields[2]); err != nil {
 				return nil, fmt.Errorf("inspect merge %s: %w", fields[0], err)
 			} else if reason != "" {
 				return nil, refuse(reason)
@@ -215,26 +214,24 @@ func agentCommitChain(sctx *pipeline.StepContext, anchor, head, baseBranch strin
 	return chain, nil
 }
 
-func verifyDefaultBranchMerge(sctx *pipeline.StepContext, merge, second, base string) (string, error) {
-	if base == "" {
-		base = effectivePRBaseBranch(sctx)
-		if url := runPRURL(sctx); url != "" {
-			host, reason := buildHost(sctx, resolvedProvider(sctx))
-			if host == nil {
-				return "", fmt.Errorf("read PR base branch to verify the merge: %s", reason)
-			}
-			reader, ok := host.(scm.PRBaseBranchReader)
-			if !ok {
-				return "", fmt.Errorf("provider cannot read the PR base branch to verify the merge")
-			}
-			actual, err := reader.GetPRBaseBranch(sctx.Ctx, prFromOwnedURL(url))
-			if err != nil {
-				return "", fmt.Errorf("read PR base branch to verify the merge: %w", err)
-			}
-			base = strings.TrimSpace(actual)
-			if base == "" {
-				return "", fmt.Errorf("PR base branch is empty; cannot verify the merge")
-			}
+func verifyDefaultBranchMerge(sctx *pipeline.StepContext, merge, second string) (string, error) {
+	host, reason := buildHost(sctx, resolvedProvider(sctx))
+	if host == nil {
+		return "", fmt.Errorf("discover PR base branch to verify the merge: %s", reason)
+	}
+	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+	pr, err := host.FindPR(sctx.Ctx, branch, "")
+	if err != nil {
+		return "", fmt.Errorf("discover PR base branch to verify the merge: %w", err)
+	}
+	if owned := runPRURL(sctx); owned != "" && !samePRIdentity(owned, pr) {
+		return "", fmt.Errorf("branch PR %q does not match recorded PR %q; cannot verify the merge", describePR(pr), owned)
+	}
+	base := effectivePRBaseBranch(sctx)
+	if pr != nil {
+		base = strings.TrimSpace(pr.BaseBranch)
+		if base == "" {
+			return "", fmt.Errorf("PR base branch is empty; cannot verify the merge")
 		}
 	}
 	tip, resolved := resolveRunDefaultBranchTip(sctx.Ctx, sctx, "", base)

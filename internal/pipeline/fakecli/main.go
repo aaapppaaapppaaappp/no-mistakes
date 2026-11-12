@@ -68,6 +68,8 @@ func handleFakeCLI(mode string) {
 		fakeGlabHandler(args)
 	case "record-success":
 		fakeRecordSuccessHandler()
+	case "pr-discovery":
+		fakePRDiscoveryHandler(args)
 	case "git-passthrough":
 		fakeGitPassthroughHandler(args)
 	case "git-move-head-passthrough":
@@ -112,6 +114,30 @@ func handleFakeCLI(mode string) {
 	default:
 		os.Exit(1)
 	}
+}
+
+func fakePRDiscoveryHandler(args []string) {
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--help") {
+		os.Exit(0)
+	}
+	for _, flag := range []string{"--base", "--target-branch"} {
+		if _, ok := fakeCLIFlagValue(args, flag); ok {
+			fmt.Fprintln(os.Stderr, "PR discovery must not filter by base")
+			os.Exit(1)
+		}
+	}
+	if message := os.Getenv("FAKE_CLI_PR_LIST_ERR"); message != "" {
+		fmt.Fprintln(os.Stderr, message)
+		os.Exit(1)
+	}
+	if !strings.HasPrefix(joined, "pr list ") && !strings.HasPrefix(joined, "mr list ") &&
+		!strings.HasPrefix(joined, "pr find ") && !strings.HasPrefix(joined, "repos pr list ") {
+		fmt.Fprintln(os.Stderr, "unexpected PR discovery command")
+		os.Exit(1)
+	}
+	fmt.Println(os.Getenv("FAKE_CLI_PR_LIST_JSON"))
+	os.Exit(0)
 }
 
 func logFakeCLIStdinBody(args []string, logFile string) {
