@@ -12,12 +12,12 @@ import (
 
 // errAgentCommitsNotLinear marks agent commits that are not a chain on the
 // recorded head the pipeline can rewrite without restructuring history: single-
-// parent commits, plus at most one merge of the default branch that
+// parent commits, plus at most one merge of the PR base branch that
 // verifyDefaultBranchMerge accepts.
 var errAgentCommitsNotLinear = errors.New("agent commits are not a linear chain from the recorded head")
 
 // agentChainCommit is one commit on the agent's first-parent chain above the
-// recorded head. mergedTip is the second parent of the one default-branch merge
+// recorded head. mergedTip is the second parent of the one PR-base merge
 // the chain may carry, and empty for an ordinary single-parent commit.
 type agentChainCommit struct {
 	sha       string
@@ -33,7 +33,7 @@ type agentChainCommit struct {
 // assertPipelineHeadContinuity and ciHeadAwaitsRecording use: every commit above
 // sctx.Run.HeadSHA is work the pipeline has not recorded yet, including commits
 // an earlier failed agent turn left behind. Only a linear chain on that head is
-// rewritten, with one exception: a single merge that brings the default branch
+// rewritten, with one exception: a single merge that brings the PR base branch
 // in (verifyDefaultBranchMerge), which a fix round needs when the base moved
 // under the PR or conflicts with it. Trees, authors and parents (both of a
 // merge's) are kept, only the message changes, and HEAD moves with a
@@ -56,9 +56,8 @@ func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, re
 	if rebaseInProgress(sctx.Ctx, sctx.WorkDir) {
 		return nil
 	}
-	// The caller's commit would conclude an unfinished merge into a merge commit,
-	// the non-linear shape refused below, with the agent's own commits above the
-	// recorded head still unshaped.
+	// Do not let the caller conclude a merge whose topology and second parent
+	// have not been verified, leaving the agent's earlier commits unshaped.
 	if mergeInProgress(sctx.Ctx, sctx.WorkDir) {
 		return fmt.Errorf("%s agent left a merge unfinished: %w; refusing to publish agent commits that bypass the commit settings", stepName, errAgentCommitsNotLinear)
 	}
@@ -169,7 +168,7 @@ func headDescendsFrom(sctx *pipeline.StepContext, anchor, head string) (bool, er
 // agentCommitChain lists the first-parent commits in anchor..head oldest first
 // and requires them to be a chain that starts at anchor: single-parent commits,
 // plus at most one two-parent merge that verifyDefaultBranchMerge accepts. Every
-// other shape - a second merge, an octopus, a merge of anything but the default
+// other shape - a second merge, an octopus, a merge of anything but the PR base
 // branch, or one whose first parent leaves the chain - is refused.
 func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]agentChainCommit, error) {
 	out, err := stepGitRun(sctx, "rev-list", "--first-parent", "--reverse", "--parents", anchor+".."+head)

@@ -327,9 +327,8 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN pr_state_observed_at INTEGER`,
 	`ALTER TABLE runs ADD COLUMN ci_ready_at INTEGER`,
 	`ALTER TABLE runs ADD COLUMN ci_ready_no_ci INTEGER NOT NULL DEFAULT 0`,
-	// The CI step's opt-in release verdict (ci.release_after_checks_pass). NULL
-	// means the step never released the run there, so its terminal status can
-	// never claim checks_passed for a run that merely monitored the PR.
+	// Durable CI release marker; see Run.CIReleasedAt for the distinction
+	// between readiness and release.
 	`ALTER TABLE runs ADD COLUMN ci_released_at INTEGER`,
 	// Custody return is nullable: NULL means the pipeline still owns any
 	// unpublished head this run produced; a timestamp means an explicit

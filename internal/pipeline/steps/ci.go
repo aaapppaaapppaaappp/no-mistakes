@@ -42,13 +42,12 @@ const (
 // findings machinery. With ci.release_after_checks_pass it instead finishes the
 // run at the checks verdict.
 //
-// By default the green observation only clears the failure signal: the monitor
-// keeps watching the PR, so the run stays open and a later base-branch advance
-// is still repaired on its own. That is also why the recorded step duration
-// includes merge-waiting time. The opt-in release finishes the step there
-// instead, recording readiness and completing the run with the terminal
-// checks_passed status, which releases its worktree and lane and leaves the
-// merge decision to a human.
+// Before the idle deadline, a green observation normally clears the failure
+// signal while monitoring continues. The recorded step duration therefore
+// includes merge-waiting time. The opt-in release finishes at readiness; an
+// expired green merge watch takes the same release path. Both record readiness
+// and complete the run with the terminal checks_passed status, releasing its
+// worktree and lane and leaving the merge decision to a human.
 //
 // Execute has the same shape as the review step's: when the executor
 // re-executes it as a fix round (sctx.Fixing), it first repairs the findings

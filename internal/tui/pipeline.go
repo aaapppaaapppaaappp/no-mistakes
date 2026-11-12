@@ -330,7 +330,7 @@ func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
 		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiGreen))
 		return style.Render("✓ Pipeline passed") + elapsed
 	case types.RunChecksPassed:
-		// The opt-in release verdict: the run validated the head and released
+		// The release verdict: the run validated the head and released
 		// the branch, so the merge decision is the user's. Keep Test exceptions
 		// and CI overrides visible here exactly as for a completed run.
 		if reason := singleLineReason(run.TestOverrideReason + "\n" + run.CIOverrideReason); reason != "" {
