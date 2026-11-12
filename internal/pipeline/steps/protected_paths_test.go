@@ -538,7 +538,7 @@ func TestProtectedPaths_AllAutomaticCommitPathsRefuseWithoutMutation(t *testing.
 			return err
 		}},
 		{"ci", func(sctx *pipeline.StepContext) error {
-			_, err := (&CIStep{}).commitRepair(sctx, "repair checks", nil)
+			_, err := (&CIStep{}).commitRepair(sctx, nil, "repair checks", nil)
 			return err
 		}},
 	} {

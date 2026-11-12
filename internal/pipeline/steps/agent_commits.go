@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -41,7 +41,7 @@ type agentChainCommit struct {
 // compare-and-swap against the head observed. An unexpected shape or a git
 // failure returns an error with the agent's commits untouched, so the change is
 // never dropped and never published unshaped.
-func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, render func() (string, error)) error {
+func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, baseBranch string, render func() (string, error)) error {
 	anchor := strings.TrimSpace(sctx.Run.HeadSHA)
 	if anchor == "" {
 		return nil
@@ -72,7 +72,7 @@ func conformAgentCommits(sctx *pipeline.StepContext, stepName types.StepName, re
 		// is not the agent adding commits; continuity checks own that case.
 		return nil
 	}
-	chain, err := agentCommitChain(sctx, anchor, head)
+	chain, err := agentCommitChain(sctx, anchor, head, baseBranch)
 	if err != nil {
 		return fmt.Errorf("inspect %s agent commits: %w", stepName, err)
 	}
@@ -172,7 +172,7 @@ func headDescendsFrom(sctx *pipeline.StepContext, anchor, head string) (bool, er
 // plus at most one two-parent merge that verifyDefaultBranchMerge accepts. Every
 // other shape - a second merge, an octopus, a merge of anything but the default
 // branch, or one whose first parent leaves the chain - is refused.
-func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]agentChainCommit, error) {
+func agentCommitChain(sctx *pipeline.StepContext, anchor, head, baseBranch string) ([]agentChainCommit, error) {
 	out, err := stepGitRun(sctx, "rev-list", "--first-parent", "--reverse", "--parents", anchor+".."+head)
 	if err != nil {
 		return nil, err
@@ -197,7 +197,7 @@ func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]agentC
 			if merged {
 				return nil, refuse("more than one merge")
 			}
-			if reason, err := verifyDefaultBranchMerge(sctx, fields[0], fields[1], fields[2]); err != nil {
+			if reason, err := verifyDefaultBranchMerge(sctx, fields[0], fields[2], baseBranch); err != nil {
 				return nil, fmt.Errorf("inspect merge %s: %w", fields[0], err)
 			} else if reason != "" {
 				return nil, refuse(reason)
@@ -215,23 +215,28 @@ func agentCommitChain(sctx *pipeline.StepContext, anchor, head string) ([]agentC
 	return chain, nil
 }
 
-// verifyDefaultBranchMerge decides whether merge, whose parents are first (on
-// the agent's chain) and second, only brings the PR's base branch in. It
-// returns the reason it is refused, or "" when it is accepted:
-//
-//   - second must be the base branch's remote tip, fetched now, or a commit
-//     that tip already contains (the base may advance again between the
-//     agent's fetch and this check). Anything else would publish commits no
-//     one reviewed under the cover of a merge.
-//   - every path the merge changes relative to second must be one the PR
-//     itself changes (merge-base(first, second)..first). Conflict resolution
-//     only touches such paths, so this admits the PR's own changes and the
-//     resolution and nothing else: a merge that also edits an unrelated file
-//     is an evil merge and is refused.
-//
-// A failure to fetch or read anything returns an error, never an acceptance.
-func verifyDefaultBranchMerge(sctx *pipeline.StepContext, merge, first, second string) (string, error) {
-	base := effectivePRBaseBranch(sctx)
+func verifyDefaultBranchMerge(sctx *pipeline.StepContext, merge, second, base string) (string, error) {
+	if base == "" {
+		base = effectivePRBaseBranch(sctx)
+		if url := runPRURL(sctx); url != "" {
+			host, reason := buildHost(sctx, resolvedProvider(sctx))
+			if host == nil {
+				return "", fmt.Errorf("read PR base branch to verify the merge: %s", reason)
+			}
+			reader, ok := host.(scm.PRBaseBranchReader)
+			if !ok {
+				return "", fmt.Errorf("provider cannot read the PR base branch to verify the merge")
+			}
+			actual, err := reader.GetPRBaseBranch(sctx.Ctx, prFromOwnedURL(url))
+			if err != nil {
+				return "", fmt.Errorf("read PR base branch to verify the merge: %w", err)
+			}
+			base = strings.TrimSpace(actual)
+			if base == "" {
+				return "", fmt.Errorf("PR base branch is empty; cannot verify the merge")
+			}
+		}
+	}
 	tip, resolved := resolveRunDefaultBranchTip(sctx.Ctx, sctx, "", base)
 	if !resolved || tip == "" {
 		return "", fmt.Errorf("fetch the remote %s branch to verify the merge", base)
@@ -245,48 +250,5 @@ func verifyDefaultBranchMerge(sctx *pipeline.StepContext, merge, first, second s
 			return fmt.Sprintf("merge %s brings in %s, which is not on the remote %s branch (tip %s)", shortSHA(merge), shortSHA(second), base, shortSHA(tip)), nil
 		}
 	}
-	forkPoint, err := stepGitRun(sctx, "merge-base", first, second)
-	if err != nil {
-		return "", fmt.Errorf("find where the PR left %s: %w", base, err)
-	}
-	prPaths, err := changedPaths(sctx, forkPoint, first)
-	if err != nil {
-		return "", err
-	}
-	mergePaths, err := changedPaths(sctx, second, merge)
-	if err != nil {
-		return "", err
-	}
-	var extra []string
-	for path := range mergePaths {
-		if !prPaths[path] {
-			extra = append(extra, path)
-		}
-	}
-	if len(extra) > 0 {
-		sort.Strings(extra)
-		const shown = 5
-		listed := strings.Join(extra[:min(len(extra), shown)], ", ")
-		if len(extra) > shown {
-			listed += fmt.Sprintf(" and %d more", len(extra)-shown)
-		}
-		return fmt.Sprintf("merge %s of %s also changes paths the PR does not: %s", shortSHA(merge), base, listed), nil
-	}
 	return "", nil
-}
-
-// changedPaths is the set of paths that differ between two commits, with rename
-// detection off so a rename counts as both of its paths.
-func changedPaths(sctx *pipeline.StepContext, from, to string) (map[string]bool, error) {
-	out, err := stepGitRunRaw(sctx, "diff", "--name-only", "--no-renames", "-z", from, to)
-	if err != nil {
-		return nil, fmt.Errorf("list paths changed in %s..%s: %w", shortSHA(from), shortSHA(to), err)
-	}
-	paths := map[string]bool{}
-	for _, path := range strings.Split(out, "\x00") {
-		if path != "" {
-			paths[path] = true
-		}
-	}
-	return paths, nil
 }

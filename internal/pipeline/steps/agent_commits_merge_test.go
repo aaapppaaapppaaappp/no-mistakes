@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -133,21 +135,102 @@ func TestCommitAgentFixes_MergeOfAnEarlierDefaultBranchCommitIsAccepted(t *testi
 	}
 }
 
-func TestCommitAgentFixes_DefaultBranchMergeThatAlsoChangesUnrelatedPathsIsRefused(t *testing.T) {
+func TestCommitAgentFixes_DefaultBranchMergePreservesRenamedPRChanges(t *testing.T) {
 	t.Parallel()
-	sctx, dir, headSHA := agentCommitContext(t, nil)
-	advanceMain(t, dir, "upstream.txt", "landed on main\n")
-	gitCmd(t, dir, "merge", "--no-ff", "--no-commit", "main")
-	// An evil merge: base.txt is neither the PR's change nor a conflict.
-	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("smuggled\n"), 0o644); err != nil {
+	sctx, dir, _ := agentCommitContext(t, nil)
+	agentCommit(t, dir, "base.txt", "updated PR contents")
+	working := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "main")
+	gitCmd(t, dir, "mv", "base.txt", "renamed.txt")
+	gitCmd(t, dir, "commit", "-m", "rename base file")
+	mainTip := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "--detach", working)
+	gitCmd(t, dir, "merge", "--no-ff", "-m", "merge", "main")
+	wantTree := gitCmd(t, dir, "rev-parse", "HEAD^{tree}")
+
+	if _, err := commitAgentFixesWithResult(sctx, types.StepTest, "merge main", "fallback", nil); err != nil {
 		t.Fatal(err)
 	}
-	gitCmd(t, dir, "add", "base.txt")
-	gitCmd(t, dir, "commit", "-m", "merge")
-	merged := gitCmd(t, dir, "rev-parse", "HEAD")
+	if got := gitCmd(t, dir, "show", "HEAD:renamed.txt"); got != "updated PR contents" {
+		t.Fatalf("renamed contents = %q, want the PR edit preserved", got)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD^{tree}"); got != wantTree {
+		t.Fatalf("tree = %s, want the merged tree %s", got, wantTree)
+	}
+	if got := commitParents(t, dir, "HEAD"); len(got) != 2 || got[1] != mainTip {
+		t.Fatalf("parents = %v, want the renamed base tip %s as second parent", got, mainTip)
+	}
+}
 
-	_, err := commitAgentFixesWithResult(sctx, types.StepTest, "merge main", "fallback", nil)
-	requireMergeRefused(t, err, "also changes paths the PR does not: base.txt", dir, merged, headSHA, sctx.Run.HeadSHA)
+func TestCommitAgentFixes_MergeUsesExistingPRForgeBase(t *testing.T) {
+	t.Parallel()
+	for _, branch := range []string{"develop", "main"} {
+		t.Run(branch, func(t *testing.T) {
+			t.Parallel()
+			sctx, dir, headSHA := agentCommitContext(t, nil)
+			gitCmd(t, dir, "branch", "develop", "main")
+			advanceMain(t, dir, "main.txt", "only on main\n")
+			gitCmd(t, dir, "checkout", "develop")
+			agentCommit(t, dir, "develop.txt", "only on develop")
+			developTip := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "--detach", headSHA)
+			gitCmd(t, dir, "merge", "--no-ff", "-m", "agent merge", branch)
+			merged := gitCmd(t, dir, "rev-parse", "HEAD")
+			sctx.Config.PR.BaseBranch = "main"
+			sctx.Run.PRURL = strptr("https://github.com/test/repo/pull/42")
+			sctx.Env = append(fakeCIGH(t, "OPEN", "[]"), "FAKE_CLI_PR_BASE=develop")
+
+			_, err := commitAgentFixesWithResult(sctx, types.StepTest, "merge base", "fallback", nil)
+			if branch == "main" {
+				requireMergeRefused(t, err, "which is not on the remote develop branch", dir, merged, headSHA, sctx.Run.HeadSHA)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := commitParents(t, dir, "HEAD"); len(got) != 2 || got[0] != headSHA || got[1] != developTip {
+				t.Fatalf("merge parents = %v, want [%s %s]", got, headSHA, developTip)
+			}
+			if got := fullMessage(t, dir, "HEAD"); got != "no-mistakes(test): merge base" {
+				t.Fatalf("message = %q", got)
+			}
+		})
+	}
+}
+
+func TestCIStep_AutoFixMergeUsesExistingPRForgeBase(t *testing.T) {
+	t.Parallel()
+	sctx, dir, headSHA := agentCommitContext(t, nil)
+	gitCmd(t, dir, "checkout", "-b", "develop", "main")
+	agentCommit(t, dir, "develop.txt", "only on develop")
+	developTip := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	sctx.Config.PR.BaseBranch = "main"
+	sctx.Config.CI.RevalidateRepairs = true
+	sctx.Run.PRURL = strptr("https://github.com/test/repo/pull/42")
+	sctx.Env = append(fakeCIGH(t, "OPEN", "[]"), "FAKE_CLI_PR_BASE=main")
+	sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		gitCmd(t, dir, "merge", "--no-ff", "-m", "agent merge", "develop")
+		return &agent.Result{Output: []byte(`{"summary":"merge develop","code_change_needed":true}`)}, nil
+	}}
+	host, reason := buildHost(sctx, scm.ProviderGitHub)
+	if host == nil {
+		t.Fatal(reason)
+	}
+	pr := &scm.PR{Number: "42", URL: *sctx.Run.PRURL, BaseBranch: "develop"}
+	repair, err := (&CIStep{}).autoFixCI(sctx, host, pr, ciTargetsFor(nil, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repair.HeadAdvanced || !repair.Revalidate {
+		t.Fatalf("repair = %+v, want the base merge recorded for revalidation", repair)
+	}
+	if got := commitParents(t, dir, "HEAD"); len(got) != 2 || got[0] != headSHA || got[1] != developTip {
+		t.Fatalf("merge parents = %v, want [%s %s]", got, headSHA, developTip)
+	}
+	if got := fullMessage(t, dir, "HEAD"); got != "no-mistakes(ci): merge develop" {
+		t.Fatalf("message = %q", got)
+	}
 }
 
 func TestCommitAgentFixes_MergeWithTheDefaultBranchAsFirstParentIsRefused(t *testing.T) {
@@ -192,7 +275,7 @@ func TestCIStep_CommitRepair_DefaultBranchMergeIsPublishableAndConformed(t *test
 	mainTip := advanceMain(t, dir, "upstream.txt", "landed on main\n")
 	gitCmd(t, dir, "merge", "--no-ff", "-m", "Merge branch 'main'", "main")
 
-	if _, err := (&CIStep{}).commitRepair(sctx, "merge main", &agent.Result{Provider: "claude"}); err != nil {
+	if _, err := (&CIStep{}).commitRepair(sctx, nil, "merge main", &agent.Result{Provider: "claude"}); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := fullMessage(t, dir, "HEAD"), "no-mistakes(ci): merge main"; got != want {

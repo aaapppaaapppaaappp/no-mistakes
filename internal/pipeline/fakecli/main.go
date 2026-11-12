@@ -738,6 +738,10 @@ func fakeCIGHHandler(args []string) {
 		}
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
+		fmt.Println(os.Getenv("FAKE_CLI_PR_BASE"))
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid") {
 		fmt.Println(fakePRHeadSHA())
 		os.Exit(0)

@@ -35,7 +35,7 @@ func TestCIStep_CommitRepair_StalledTransportHelperFailsClosedWithinItsDeadline(
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := (&CIStep{}).commitRepair(sctx, "repair", nil)
+		_, err := (&CIStep{}).commitRepair(sctx, nil, "repair", nil)
 		done <- err
 	}()
 	var err error

@@ -422,19 +422,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		return nil, fmt.Errorf("extract PR number: %w", err)
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
-	if retryRefusal {
-		if err := clearCIMonitorReadyForIssues(sctx); err != nil {
-			return nil, err
-		}
-		repair, err := s.retryProtectedPathRepair(sctx)
-		if err != nil {
-			return nil, err
-		}
-		retryRefusal = false
-		if repair.Revalidate {
-			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom()}, nil
-		}
-	}
 	baseBranch := effectivePRBaseBranch(sctx)
 	// A resumed run may have a different trusted configuration than the run
 	// that created this PR. Re-read the forge record without a base filter so
@@ -451,6 +438,19 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}
 	if strings.TrimSpace(pr.BaseBranch) != "" {
 		baseBranch = strings.TrimSpace(pr.BaseBranch)
+	}
+	if retryRefusal {
+		if err := clearCIMonitorReadyForIssues(sctx); err != nil {
+			return nil, err
+		}
+		repair, err := s.retryProtectedPathRepair(sctx, pr)
+		if err != nil {
+			return nil, err
+		}
+		retryRefusal = false
+		if repair.Revalidate {
+			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom()}, nil
+		}
 	}
 	if repairRequested {
 		repairOutcome, err := s.repairFromFindings(sctx, host, pr)
@@ -580,7 +580,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		if len(timeoutExternalReviews) > 0 {
 			external := ciObservationFindings(ciIssues{requiredReviews: requiredReviews(sctx), checks: timeoutExternalReviews, failing: failingCheckNames(timeoutExternalReviews)})
-			if len(timeoutFailingChecks) > 0 || timeoutMergeConflict || mergeabilityBlockedReason != "" {
+			if len(timeoutFailingChecks) > 0 || timeoutMergeConflict || mergeabilityBlockedReason != "" || len(queued) > 0 {
 				prior, _ := types.ParseFindingsJSON(outcome.Findings)
 				external.Items = append(prior.Items, external.Items...)
 				external.Summary = prior.Summary + "; " + external.Summary
@@ -796,24 +796,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// check held for maintainer approval will not finish on its own,
 			// so it does not defer the other checks' issues.
 			checksPending := hasExecutingPendingChecks(checks)
-			if queued := queuedCheckNames(checks); len(queued) == 0 {
-				queuedSince = time.Time{}
-			} else {
-				if queuedSince.IsZero() {
-					queuedSince = now()
-				}
-				queuedFor := now().Sub(queuedSince)
-				if !queuedUnlimited && queuedFor >= queuedTimeout {
-					return timeoutOutcome(queued, queuedFor)
-				}
-				if !unlimited {
-					if deadlinePassed {
-						sctx.Log(fmt.Sprintf("CI timeout re-armed: %s still queued for a runner after %s (ci_queued_timeout: %s)", strings.Join(queued, ", "), queuedFor.Round(time.Second), queuedTimeout))
-					}
-					timeoutAnchor = now()
-					deadlinePassed = false
-				}
-			}
 			// readinessPending is deliberately broader: any state that is not a
 			// conclusive pass, failure, or skip must keep the PR non-ready. This
 			// includes cancelled, held, and unknown provider states.
@@ -907,6 +889,25 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 							timeoutFailingChecks = append(timeoutFailingChecks[:i], timeoutFailingChecks[i+1:]...)
 						}
 					}
+				}
+			}
+
+			if queued := queuedCheckNames(checks); len(queued) == 0 {
+				queuedSince = time.Time{}
+			} else {
+				if queuedSince.IsZero() {
+					queuedSince = now()
+				}
+				queuedFor := now().Sub(queuedSince)
+				if !queuedUnlimited && queuedFor >= queuedTimeout {
+					return timeoutOutcome(queued, queuedFor)
+				}
+				if !unlimited {
+					if deadlinePassed {
+						sctx.Log(fmt.Sprintf("CI timeout re-armed: %s still queued for a runner after %s (ci_queued_timeout: %s)", strings.Join(queued, ", "), queuedFor.Round(time.Second), queuedTimeout))
+					}
+					timeoutAnchor = now()
+					deadlinePassed = false
 				}
 			}
 

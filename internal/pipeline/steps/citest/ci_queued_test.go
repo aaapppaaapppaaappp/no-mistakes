@@ -160,6 +160,99 @@ func TestCIStep_QueuedCheckCapIsNeverShorterThanCITimeout(t *testing.T) {
 	}
 }
 
+func TestCIStep_QueuedCheckCapReportsCurrentPollFailures(t *testing.T) {
+	t.Parallel()
+	const queuedBuildFailure = `[{"name":"odoo-suites","status":"QUEUED","bucket":"pending"},{"name":"build","state":"FAILURE","bucket":"fail"}]`
+	const queuedTestFailure = `[{"name":"odoo-suites","status":"QUEUED","bucket":"pending"},{"name":"test","state":"FAILURE","bucket":"fail"}]`
+	for _, tc := range []struct {
+		name, first, last string
+		failures          []string
+	}{
+		{name: "new failure at the cap", first: queuedSuite, last: queuedBuildFailure, failures: []string{"build"}},
+		{name: "previous failure clears at the cap", first: queuedBuildFailure, last: queuedSuite},
+		{name: "failure changes at the cap", first: queuedBuildFailure, last: queuedTestFailure, failures: []string{"test"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTimedCIMonitor(t, 10*time.Second, 30*time.Second, tc.first, func(poll int) (string, time.Duration, bool) {
+				return tc.last, 30 * time.Second, poll == 1
+			})
+			outcome, err := m.step.Execute(m.sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome == nil || !outcome.NeedsApproval || outcome.AutoFixable {
+				t.Fatalf("outcome = %+v, want the queue cap to park for a decision", outcome)
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(findings.Items) != len(tc.failures)+1 {
+				t.Fatalf("findings = %+v, want the queue and current failures %v", findings.Items, tc.failures)
+			}
+			queued := false
+			var failures []string
+			for _, item := range findings.Items {
+				if item.ID == "ci-checks-queued" {
+					queued = item.ActionOrDefault() == types.ActionAskUser
+				} else if item.Category == types.FindingCategoryCICheck {
+					failures = append(failures, item.Check)
+				}
+			}
+			if !queued || strings.Join(failures, ",") != strings.Join(tc.failures, ",") {
+				t.Fatalf("findings = %+v, want queue and current failures %v", findings.Items, tc.failures)
+			}
+		})
+	}
+}
+
+func TestCIStep_QueuedCheckCapPreservesPendingExternalReview(t *testing.T) {
+	t.Parallel()
+	for _, withFailure := range []bool{false, true} {
+		name, capChecks := "queue and review", queuedSuite
+		wantCount := 2
+		if withFailure {
+			name = "queue, failure and review"
+			capChecks = `[{"name":"odoo-suites","status":"QUEUED","bucket":"pending"},{"name":"build","state":"FAILURE","bucket":"fail"}]`
+			wantCount = 3
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			m := newTimedCIMonitor(t, 10*time.Second, 30*time.Second, queuedSuite, func(poll int) (string, time.Duration, bool) {
+				return capChecks, 30 * time.Second, poll == 1
+			})
+			m.sctx.Config.CI.RequiredReviews = []string{"coderabbit"}
+			m.sctx.Env = append(m.sctx.Env,
+				"FAKE_CLI_PR_HEAD_SHA="+m.sctx.Run.HeadSHA,
+				"FAKE_CLI_EXTERNAL_REVIEWS="+externalReviewPayload(m.sctx.Run.HeadSHA, "in_progress", "", ""))
+			outcome, err := m.step.Execute(m.sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome == nil || !outcome.NeedsApproval || outcome.AutoFixable {
+				t.Fatalf("outcome = %+v, want an ask-user timeout", outcome)
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			queued, review, failure := false, false, false
+			for _, item := range findings.Items {
+				if item.ActionOrDefault() != types.ActionAskUser {
+					t.Fatalf("finding = %+v, want ask-user", item)
+				}
+				queued = queued || item.ID == "ci-checks-queued"
+				review = review || item.Category == types.FindingCategoryCIReviewBot
+				failure = failure || item.Category == types.FindingCategoryCICheck && item.Check == "build"
+			}
+			if len(findings.Items) != wantCount || !queued || !review || failure != withFailure {
+				t.Fatalf("findings = %+v, want queue, review, and failure=%t", findings.Items, withFailure)
+			}
+		})
+	}
+}
+
 func TestCIStep_GreenChecksAtTheDeadlineEndAsChecksPassed(t *testing.T) {
 	t.Parallel()
 	m := newTimedCIMonitor(t, 10*time.Second, 0, greenSuite, func(poll int) (string, time.Duration, bool) {
